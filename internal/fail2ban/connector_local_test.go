@@ -137,6 +137,20 @@ exit 255
 	}
 }
 
+func TestLocalValidateMissingFilterIsNotAnIncompleteTree(t *testing.T) {
+	withFakeBinary(t, "fail2ban-client", `echo "2026-10-11 00:08:01,120 fail2ban.configreader   [18]: ERROR   Found no accessible config files for 'filter.d/does-not-exist' under /etc/fail2ban" >&2
+echo "2026-10-11 00:08:01,120 fail2ban.jailsreader    [18]: ERROR   Errors in jail 'example'." >&2
+exit 255
+`)
+	err := testLocalConnector(t).ValidateConfiguration(context.Background())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "complete Fail2ban configuration") {
+		t.Fatalf("a missing filter must not be reported as an incomplete configuration tree: %v", err)
+	}
+}
+
 func TestLocalCommandErrorsAreNotLabelledSSH(t *testing.T) {
 	withFakeBinary(t, "fail2ban-client", `echo "boom" >&2
 exit 1

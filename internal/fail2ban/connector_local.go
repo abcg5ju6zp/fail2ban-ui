@@ -110,7 +110,7 @@ func (lc *LocalConnector) BanIP(ctx context.Context, jail, ip string) error {
 func (lc *LocalConnector) Reload(ctx context.Context) error {
 	out, err := lc.runFail2banClient(ctx, "-c", lc.configPath(), "reload")
 	if err != nil {
-		if strings.Contains(err.Error(), "Found no accessible config files") {
+		if isIncompleteConfigTree(err.Error()) {
 			return fmt.Errorf("fail2ban reload error: %w - fail2ban-ui cannot see the complete fail2ban configuration: when sharing a socket with a fail2ban container, /etc/fail2ban inside the fail2ban-ui container must contain the full configuration tree (including fail2ban.conf and jail.conf), not only the custom jail/filter files", err)
 		}
 		return fmt.Errorf("fail2ban reload error: %w (output: %s)", err, strings.TrimSpace(out))

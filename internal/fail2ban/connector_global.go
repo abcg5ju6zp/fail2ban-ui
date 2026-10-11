@@ -19,12 +19,39 @@ package fail2ban
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/swissmakers/fail2ban-ui/internal/shared"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/swissmakers/fail2ban-ui/internal/shared"
 )
+
+// =========================================================================
+//  Types
+// =========================================================================
+
+type JailInfo struct {
+	JailName      string   `json:"jailName"`
+	TotalBanned   int      `json:"totalBanned"`
+	NewInLastHour int      `json:"newInLastHour"`
+	BannedIPs     []string `json:"bannedIPs"`
+	Enabled       bool     `json:"enabled"`
+}
+
+type JailSummary struct {
+	Jails             []JailInfo
+	JailLocalExists   bool
+	JailLocalManaged  bool
+	ActionFileDrifted bool
+}
+
+type reprScanner struct {
+	in  string
+	pos int
+}
 
 // =========================================================================
 //  Validation
@@ -129,12 +156,6 @@ func truncateForError(s string) string {
 		return s
 	}
 	return s[:limit] + "..."
-}
-
-// Minimal scanner for the subset of Python repr that fail2ban emits
-type reprScanner struct {
-	in  string
-	pos int
 }
 
 func (s *reprScanner) done() bool { return s.pos >= len(s.in) }
@@ -258,27 +279,6 @@ func checkPingOutput(out string, err error, label string) error {
 }
 
 // =========================================================================
-//  Types
-// =========================================================================
-
-// A single Fail2ban jail
-type JailInfo struct {
-	JailName      string   `json:"jailName"`
-	TotalBanned   int      `json:"totalBanned"`
-	NewInLastHour int      `json:"newInLastHour"`
-	BannedIPs     []string `json:"bannedIPs"`
-	Enabled       bool     `json:"enabled"`
-}
-
-// Result of one summary fetch
-type JailSummary struct {
-	Jails             []JailInfo
-	JailLocalExists   bool
-	JailLocalManaged  bool
-	ActionFileDrifted bool
-}
-
-// =========================================================================
 //  Service Control
 // =========================================================================
 
@@ -296,10 +296,38 @@ func pingFail2ban(ctx context.Context, run fail2banRunner, label string) error {
 	return checkPingOutput(out, err, label)
 }
 
+var ErrRestartNotResponding = errors.New("Fail2ban accepted the command but is not responding yet")
+
+const restartReadyTimeout = 30 * time.Second
+
+func waitForFail2ban(ctx context.Context, run fail2banRunner, label string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	delay := 250 * time.Millisecond
+	for {
+		err := pingFail2ban(ctx, run, label)
+		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+		delay = min(delay*2, 2*time.Second)
+	}
+}
+
+func isIncompleteConfigTree(output string) bool {
+	return strings.Contains(output, "Found no accessible config files for 'fail2ban' under") ||
+		strings.Contains(output, "Found no accessible config files for 'jail' under")
+}
+
 func validateConfig(ctx context.Context, run fail2banRunner, root string) error {
 	out, err := run(ctx, "-c", root, "-t")
 	if err != nil {
-		if strings.Contains(err.Error(), "Found no accessible config files") {
+		if isIncompleteConfigTree(err.Error()) {
 			return fmt.Errorf("configuration validation failed: %s must contain the complete Fail2ban configuration "+
 				"(fail2ban.conf, jail.conf and the stock action.d and filter.d files), not only custom jail, filter and action files: %w", root, err)
 		}

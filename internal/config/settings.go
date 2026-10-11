@@ -291,7 +291,8 @@ logpath = /dev/null
 
 # Number of log lines to include in the callback
 grepmax = 200
-grepopts = -m <grepmax>`
+grepopts = -m <grepmax>
+`
 
 // =========================================================================
 //  Package Variables

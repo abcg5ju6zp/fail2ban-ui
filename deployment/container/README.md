@@ -303,10 +303,35 @@ Modern distributions - Rocky Linux 9+, RHEL 9+, Fedora 36+, Debian 12+ - use **n
 Solution - switch Fail2Ban to nftables-based actions:
 
 1. Open the Fail2Ban UI web interface.
-2. Go to **Settings -> Fail2Ban Settings**.
+2. Go to **Settings -> Global Default Fail2Ban Configurations**.
 3. Change **Banaction** from `iptables-multiport` to `nftables-multiport`.
 4. Change **Banaction Allports** from `iptables-allports` to `nftables-allports`.
 5. Save; Fail2Ban reloads automatically.
+
+### Legacy iptables hosts (e.g. Synology DSM)
+
+Some hosts, such as Synology DSM, still use legacy iptables. linuxserver/fail2ban runs `iptables` with the nftables backend, so its rules end up in a ruleset that the host does not use. Fail2Ban and Fail2Ban UI report the ban, but no rule appears in `iptables -L -n` on the host.
+
+Switch the iptables actions to the legacy binary, which the image already contains:
+
+1. Create `action.d/iptables.local` in the shared Fail2Ban configuration directory:
+
+   ```ini
+   [Init]
+   iptables = iptables-legacy <lockingopt>
+
+   [Init?family=inet6]
+   iptables = ip6tables-legacy <lockingopt>
+   ```
+
+2. Keep **Banaction** at `iptables-multiport` and **Banaction Allports** at `iptables-allports`.
+3. Restart the fail2ban container.
+
+Check on the host that banned addresses appear in a chain named `f2b-<jail>`:
+
+```bash
+iptables -L -n | grep f2b-
+```
 
 ### firewalld (RHEL, Rocky Linux)
 

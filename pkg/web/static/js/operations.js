@@ -254,6 +254,8 @@ function renderOperations() {
       detail = operationsStatusError;
     } else if (operation.state === 'queued') {
       detail = t('operations.queue_hint', 'Waiting for earlier changes on this server.');
+    } else if (operation.state === 'reconciling' && operation.message) {
+      detail = operation.message;
     } else if (operation.state === 'running' && operation.phase === 'applying' &&
         Object.values(operation.desiredStates || {}).some(function(enabled) { return !enabled; })) {
       detail = t('operations.toast.stopping', 'Removing existing bans. This can take a few minutes.');
@@ -266,7 +268,7 @@ function renderOperations() {
       + '<div class="flex-1 min-w-0">'
       + '<div class="text-sm font-semibold break-words">' + escapeHtml(operationToastTitle(operation)) + '</div>'
       + '<div class="text-xs opacity-80 mt-1">' + escapeHtml(server ? server.name : operation.serverId)
-      + ' · ' + escapeHtml(operationStateLabel(operation.state))
+      + ' - ' + escapeHtml(operationStateLabel(operation.state))
       + '</div>'
       + (active ? '<div class="text-xs opacity-80 mt-1" aria-hidden="true" data-operation-elapsed="' + escapeHtml(id) + '" hidden></div>' : '')
       + (detail ? '<p class="text-xs mt-2 break-words">' + escapeHtml(detail) + '</p>' : '')

@@ -110,7 +110,7 @@ func (lc *LocalConnector) BanIP(ctx context.Context, jail, ip string) error {
 func (lc *LocalConnector) Reload(ctx context.Context) error {
 	out, err := lc.runFail2banClient(ctx, "-c", lc.configPath(), "reload")
 	if err != nil {
-		if strings.Contains(err.Error(), "Found no accessible config files") {
+		if isIncompleteConfigTree(err.Error()) {
 			return fmt.Errorf("fail2ban reload error: %w - fail2ban-ui cannot see the complete fail2ban configuration: when sharing a socket with a fail2ban container, /etc/fail2ban inside the fail2ban-ui container must contain the full configuration tree (including fail2ban.conf and jail.conf), not only the custom jail/filter files", err)
 		}
 		return fmt.Errorf("fail2ban reload error: %w (output: %s)", err, strings.TrimSpace(out))
@@ -130,16 +130,16 @@ func (lc *LocalConnector) Restart(ctx context.Context) (string, error) {
 			return "restart", fmt.Errorf("failed to restart fail2ban via systemd: %w - output: %s",
 				err, strings.TrimSpace(string(out)))
 		}
-		if err := pingFail2ban(ctx, lc.runFail2banClient, "fail2ban"); err != nil {
-			return "restart", fmt.Errorf("fail2ban health check after systemd restart failed: %w", err)
+		if err := waitForFail2ban(ctx, lc.runFail2banClient, "fail2ban", restartReadyTimeout); err != nil {
+			return "restart", fmt.Errorf("%w: fail2ban health check after systemd restart failed: %w", ErrRestartNotResponding, err)
 		}
 		return "restart", nil
 	}
 	if err := lc.Reload(ctx); err != nil {
 		return "reload", fmt.Errorf("failed to reload fail2ban via fail2ban-client (systemctl not available): %w", err)
 	}
-	if err := pingFail2ban(ctx, lc.runFail2banClient, "fail2ban"); err != nil {
-		return "reload", fmt.Errorf("fail2ban health check after reload failed: %w", err)
+	if err := waitForFail2ban(ctx, lc.runFail2banClient, "fail2ban", restartReadyTimeout); err != nil {
+		return "reload", fmt.Errorf("%w: fail2ban health check after reload failed: %w", ErrRestartNotResponding, err)
 	}
 	return "reload", nil
 }

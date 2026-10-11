@@ -191,7 +191,7 @@ function renderTimelineRangePicker() {
   }
   var label = document.getElementById('timelineRangeLabel');
   if (label && range.since && range.until) {
-    label.textContent = formatDateTime(range.since) + ' – ' + formatDateTime(range.until);
+    label.textContent = formatDateTime(range.since) + ' - ' + formatDateTime(range.until);
   }
   var chip = document.getElementById('timelineLiveChip');
   if (chip && insightsTimeline.wsPending === 0) {
@@ -306,7 +306,7 @@ function timelineTooltipFormatter(params) {
   var end = bucket.ts + insightsTimeline.bucketSeconds * 1000;
   var html = '<div style="font-size:12px;">'
     + '<div style="margin-bottom:4px;font-weight:600;">'
-    + escapeHtml(formatDateTime(new Date(bucket.ts))) + ' – ' + escapeHtml(formatDateTime(new Date(end)))
+    + escapeHtml(formatDateTime(new Date(bucket.ts))) + ' - ' + escapeHtml(formatDateTime(new Date(end)))
     + '</div>';
   for (var i = 0; i < params.length; i++) {
     html += '<div>' + params[i].marker + ' ' + escapeHtml(params[i].seriesName) + ': <b>'
@@ -674,13 +674,13 @@ function renderIncidentCompare() {
           + (incident.truncated ? ' ' + t('logs.timeline.ip_count_capped', '(limit reached)') : '');
       chipsHtml += '<span class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-xs">'
         + '<b>' + escapeHtml(slotLabel) + '</b> '
-        + escapeHtml(formatDateTime(incident.since) + ' – ' + formatDateTime(incident.until))
-        + ' · ' + escapeHtml(detail)
+        + escapeHtml(formatDateTime(incident.since) + ' - ' + formatDateTime(incident.until))
+        + ' - ' + escapeHtml(detail)
         + '<button type="button" class="text-blue-500 hover:text-blue-800" onclick="clearIncident(\'' + slot + '\')" title="' + escapeHtml(t('logs.timeline.compare_clear', 'Clear')) + '" aria-label="' + escapeHtml(t('logs.timeline.compare_clear', 'Clear')) + '">&times;</button>'
         + '</span>';
     } else {
       chipsHtml += '<span class="inline-flex items-center px-3 py-1 rounded-full bg-gray-100 text-gray-400 text-xs">'
-        + escapeHtml(slotLabel) + ' – ' + escapeHtml(t('logs.timeline.compare_unpinned', 'not pinned'))
+        + escapeHtml(slotLabel) + ' - ' + escapeHtml(t('logs.timeline.compare_unpinned', 'not pinned'))
         + '</span>';
     }
   });
@@ -710,7 +710,7 @@ function renderIncidentCompare() {
       html += '<div class="flex items-center gap-3 px-3 py-1.5 text-xs">'
         + '<span class="font-mono text-gray-900">' + escapeHtml(entry.ip) + '</span>'
         + '<span class="text-gray-500">' + escapeHtml(country) + '</span>'
-        + '<span class="ml-auto text-gray-400">A: ' + formatNumber(entry.countA) + ' · B: ' + formatNumber(entry.countB) + '</span>'
+        + '<span class="ml-auto text-gray-400">A: ' + formatNumber(entry.countA) + ' - B: ' + formatNumber(entry.countB) + '</span>'
         + '</div>';
     }
     html += '</div>';
@@ -723,7 +723,7 @@ function renderIncidentCompare() {
       + '<div class="flex flex-wrap gap-2">';
     for (var s = 0; s < suggestions.length; s++) {
       sHtml += '<button type="button" class="px-2 py-1 text-xs rounded border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100" onclick="applySuggestedPeriod(' + s + ')">'
-        + escapeHtml(suggestions[s].day) + ' · ' + escapeHtml(t('logs.timeline.ip_count', '{count} IPs').replace('{count}', formatNumber(suggestions[s].overlap)))
+        + escapeHtml(suggestions[s].day) + ' - ' + escapeHtml(t('logs.timeline.ip_count', '{count} IPs').replace('{count}', formatNumber(suggestions[s].overlap)))
         + '</button>';
     }
     sHtml += '</div>';

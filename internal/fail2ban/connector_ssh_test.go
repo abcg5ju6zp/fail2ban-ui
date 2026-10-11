@@ -663,6 +663,24 @@ func TestSplitBannedSummary(t *testing.T) {
 		}
 	})
 
+	t.Run("files without trailing newline", func(t *testing.T) {
+		jailLocal := "[DEFAULT]\naction = %(action_mwlg)s"
+		action := "[Definition]\ngrepopts = -m <grepmax>"
+		out := "Jail list: sshd\n" + bannedSectionEnd + "\n" +
+			batchJailLocalBegin + "\n" + jailLocal + batchActionBegin + "\n" +
+			action + batchEnd + "\n"
+		got, err := splitBannedSummary(out)
+		if err != nil {
+			t.Fatalf("a marker after a file without trailing newline must still be found: %v", err)
+		}
+		if !got.jailLocalExists || !got.actionExists {
+			t.Fatalf("both files must be reported as present: %+v", got)
+		}
+		if got.jailLocal != jailLocal || got.actionFile != action {
+			t.Fatalf("file contents must stay exact: jail.local=%q action=%q", got.jailLocal, got.actionFile)
+		}
+	})
+
 	t.Run("action file missing", func(t *testing.T) {
 		out := strings.Join([]string{
 			"Jail list:",

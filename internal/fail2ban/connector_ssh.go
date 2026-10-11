@@ -166,8 +166,8 @@ func (sc *SSHConnector) Restart(ctx context.Context) (string, error) {
 	// Try systemd restart on the remote host first.
 	out, err := sc.runRemoteCommand(ctx, []string{shellJoin("sudo", "-n", "systemctl", "restart", "fail2ban")})
 	if err == nil {
-		if err := pingFail2ban(ctx, sc.runFail2banCommand, "remote fail2ban"); err != nil {
-			return "restart", fmt.Errorf("remote fail2ban health check after systemd restart failed: %w", err)
+		if err := waitForFail2ban(ctx, sc.runFail2banCommand, "remote fail2ban", restartReadyTimeout); err != nil {
+			return "restart", fmt.Errorf("%w: remote fail2ban health check after systemd restart failed: %w", ErrRestartNotResponding, err)
 		}
 		return "restart", nil
 	}
@@ -176,8 +176,8 @@ func (sc *SSHConnector) Restart(ctx context.Context) (string, error) {
 		if reloadErr := sc.Reload(ctx); reloadErr != nil {
 			return "reload", fmt.Errorf("failed to reload fail2ban via fail2ban-client on remote: %w", reloadErr)
 		}
-		if err := pingFail2ban(ctx, sc.runFail2banCommand, "remote fail2ban"); err != nil {
-			return "reload", fmt.Errorf("remote fail2ban health check after reload failed: %w", err)
+		if err := waitForFail2ban(ctx, sc.runFail2banCommand, "remote fail2ban", restartReadyTimeout); err != nil {
+			return "reload", fmt.Errorf("%w: remote fail2ban health check after reload failed: %w", ErrRestartNotResponding, err)
 		}
 		return "reload", nil
 	}
@@ -272,6 +272,16 @@ func splitBannedSummary(out string) (bannedSummary, error) {
 	complete := false
 
 	for _, line := range strings.Split(out, "\n") {
+		if mode == inJailLocal || mode == inAction {
+			if content, marker, ok := cutTrailingMarker(line); ok {
+				if mode == inJailLocal {
+					jailLocalBuf.WriteString(content)
+				} else {
+					actionBuf.WriteString(content)
+				}
+				line = marker
+			}
+		}
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case trimmed == bannedSectionEnd:
@@ -309,6 +319,16 @@ func splitBannedSummary(out string) (bannedSummary, error) {
 	res.jailLocal = jailLocalBuf.String()
 	res.actionFile = actionBuf.String()
 	return res, nil
+}
+
+func cutTrailingMarker(line string) (string, string, bool) {
+	trimmed := strings.TrimRight(line, " \t\r")
+	for _, marker := range []string{batchActionBegin, batchActionMissing, batchEnd} {
+		if trimmed != marker && strings.HasSuffix(trimmed, marker) {
+			return strings.TrimSuffix(trimmed, marker), marker, true
+		}
+	}
+	return "", "", false
 }
 
 func (sc *SSHConnector) runFail2banCommand(ctx context.Context, args ...string) (string, error) {

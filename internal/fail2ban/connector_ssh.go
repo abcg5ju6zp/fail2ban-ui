@@ -272,6 +272,16 @@ func splitBannedSummary(out string) (bannedSummary, error) {
 	complete := false
 
 	for _, line := range strings.Split(out, "\n") {
+		if mode == inJailLocal || mode == inAction {
+			if content, marker, ok := cutTrailingMarker(line); ok {
+				if mode == inJailLocal {
+					jailLocalBuf.WriteString(content)
+				} else {
+					actionBuf.WriteString(content)
+				}
+				line = marker
+			}
+		}
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case trimmed == bannedSectionEnd:
@@ -309,6 +319,16 @@ func splitBannedSummary(out string) (bannedSummary, error) {
 	res.jailLocal = jailLocalBuf.String()
 	res.actionFile = actionBuf.String()
 	return res, nil
+}
+
+func cutTrailingMarker(line string) (string, string, bool) {
+	trimmed := strings.TrimRight(line, " \t\r")
+	for _, marker := range []string{batchActionBegin, batchActionMissing, batchEnd} {
+		if trimmed != marker && strings.HasSuffix(trimmed, marker) {
+			return strings.TrimSuffix(trimmed, marker), marker, true
+		}
+	}
+	return "", "", false
 }
 
 func (sc *SSHConnector) runFail2banCommand(ctx context.Context, args ...string) (string, error) {

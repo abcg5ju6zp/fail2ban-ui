@@ -41,6 +41,7 @@ DATA_DIRS=(
   config
   f2b-run-local
   fail2ban-config-local
+  fail2ban-config-local-secondary
   fail2ban-config-ssh
   ssh-keys
 )

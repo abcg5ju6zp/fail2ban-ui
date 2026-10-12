@@ -74,6 +74,14 @@ func main() {
 		log.Fatalf("failed to initialise fail2ban connectors: %v", err)
 	}
 
+	// Finish or roll back host-key accepts whose outcome a crash or canceled
+	// request left uncertain, reconciling known_hosts with the durable alerts.
+	go func() {
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		fail2ban.RecoverHostKeyStates(recoveryCtx)
+	}()
+
 	if err := web.StartOperations(); err != nil {
 		log.Fatalf("failed to start background operations: %v", err)
 	}

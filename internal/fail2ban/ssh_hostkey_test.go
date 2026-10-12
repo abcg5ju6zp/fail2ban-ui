@@ -17,16 +17,13 @@
 package fail2ban
 
 import (
-	"context"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/swissmakers/fail2ban-ui/internal/shared"
 )
@@ -166,49 +163,144 @@ func generateHostKey(t *testing.T) ssh.PublicKey {
 	return key
 }
 
-func TestKnownHostsRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	khPath := filepath.Join(dir, "known_hosts")
+// Parses every entry line, returning host tokens and the pinned fingerprint per line.
+func parseKnownHostsEntries(t *testing.T, data []byte) []struct {
+	hosts []string
+	fp    string
+} {
+	t.Helper()
+	var out []struct {
+		hosts []string
+		fp    string
+	}
+	rest := data
+	for len(bytes.TrimSpace(rest)) > 0 {
+		_, hosts, key, _, next, err := ssh.ParseKnownHosts(rest)
+		if err != nil {
+			t.Fatalf("generated known_hosts must parse: %v\n%s", err, rest)
+		}
+		out = append(out, struct {
+			hosts []string
+			fp    string
+		}{hosts: hosts, fp: ssh.FingerprintSHA256(key)})
+		rest = next
+	}
+	return out
+}
+
+func TestBuildKnownHostsContentReplacesAllTargetEntries(t *testing.T) {
+	pattern := knownHostsPattern("127.0.0.1", 2222) // [127.0.0.1]:2222
+	oldKey := generateHostKey(t)
+	newKey := generateHostKey(t)
+	otherKey := generateHostKey(t)
+	hashedOld := knownhosts.Line([]string{knownhosts.HashHostname(pattern)}, oldKey)
+	plainOld := knownhosts.Line([]string{pattern}, oldKey)
+	other := knownhosts.Line([]string{"other.example", pattern}, otherKey)
+	old := []byte("# managed by ops\n" + plainOld + "\n\n" + hashedOld + "\n" + other + "\n")
+
+	content := buildKnownHostsContent(old, pattern, newKey)
+	entries := parseKnownHostsEntries(t, content)
+
+	var targetFPs, otherFPs []string
+	for _, e := range entries {
+		coversTarget := false
+		for _, h := range e.hosts {
+			if h == "other.example" {
+				otherFPs = append(otherFPs, e.fp)
+			}
+			if knownHostTokenAuthorizes(h, pattern) {
+				coversTarget = true
+			}
+		}
+		if coversTarget {
+			targetFPs = append(targetFPs, e.fp)
+		}
+	}
+	if len(targetFPs) != 1 || targetFPs[0] != ssh.FingerprintSHA256(newKey) {
+		t.Errorf("target must pin exactly the new key, got %v", targetFPs)
+	}
+	if len(otherFPs) != 1 || otherFPs[0] != ssh.FingerprintSHA256(otherKey) {
+		t.Errorf("unrelated host entry must survive, got %v", otherFPs)
+	}
+	if !bytes.Contains(content, []byte("# managed by ops")) {
+		t.Error("comments must be preserved")
+	}
+	// No duplicate or leftover old entries.
+	if !bytes.Contains(content, []byte(knownhosts.Line([]string{pattern}, newKey))) {
+		t.Error("new entry missing")
+	}
+}
+
+func TestBuildKnownHostsContentFirstTrust(t *testing.T) {
+	pattern := knownHostsPattern("host.example", 0) // default port 22, no brackets
 	key := generateHostKey(t)
+	content := buildKnownHostsContent(nil, pattern, key)
+	entries := parseKnownHostsEntries(t, content)
+	if len(entries) != 1 || entries[0].hosts[0] != "host.example" ||
+		entries[0].fp != ssh.FingerprintSHA256(key) {
+		t.Fatalf("first-trust content = %+v", entries)
+	}
+}
+
+func TestStripKnownHostsKeepsUnreadableLines(t *testing.T) {
 	pattern := knownHostsPattern("127.0.0.1", 2222)
+	garbage := []byte("this line is not a valid known_hosts record\n")
+	stripped := stripKnownHostsEntries(garbage, pattern)
+	if !bytes.Equal(stripped, garbage) {
+		t.Errorf("unparseable lines must be kept verbatim, got %q", stripped)
+	}
+}
 
-	if err := appendKnownHostEntry(khPath, pattern, key); err != nil {
-		t.Fatal(err)
+func TestKnownHostTokenAuthorizes(t *testing.T) {
+	pattern := "[127.0.0.1]:2222"
+	if !knownHostTokenAuthorizes(pattern, pattern) {
+		t.Error("plain token must match")
 	}
-	data, err := os.ReadFile(khPath)
-	if err != nil {
-		t.Fatal(err)
+	if knownHostTokenAuthorizes("other.example", pattern) {
+		t.Error("unrelated plain token must not match")
 	}
-	_, hosts, parsed, _, _, err := ssh.ParseKnownHosts(data)
-	if err != nil {
-		t.Fatalf("written entry must parse: %v", err)
+	if !knownHostTokenAuthorizes(knownhosts.HashHostname(pattern), pattern) {
+		t.Error("hashed token for this authority must match")
 	}
-	if len(hosts) != 1 || hosts[0] != pattern {
-		t.Errorf("hosts = %v, want [%s]", hosts, pattern)
+	if knownHostTokenAuthorizes(knownhosts.HashHostname("127.0.0.1"), pattern) {
+		t.Error("hashed token of the port-22 authority must not match port 2222")
 	}
-	if ssh.FingerprintSHA256(parsed) != ssh.FingerprintSHA256(key) {
-		t.Error("fingerprint mismatch after round trip")
+	if knownHostTokenAuthorizes("|1|not-base64!!", pattern) {
+		t.Error("malformed hash token must not match")
 	}
+	// A negated entry for the same authority must be dropped on re-pin,
+	// otherwise it would revoke the newly appended key.
+	if !knownHostTokenAuthorizes("!"+pattern, pattern) {
+		t.Error("negated token for the same authority must be classified as covering it")
+	}
+}
 
-	if _, err := exec.LookPath("ssh-keygen"); err != nil {
-		t.Skip("ssh-keygen not available")
-	}
-	if err := removeKnownHostEntries(context.Background(), khPath, pattern); err != nil {
-		t.Fatal(err)
-	}
-	data, err = os.ReadFile(khPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), "127.0.0.1") {
-		t.Errorf("entry must be removed, file still contains: %q", string(data))
-	}
-	if _, err := os.Stat(khPath + ".old"); !os.IsNotExist(err) {
-		t.Error(".old backup must be deleted")
-	}
+func TestMatchingKnownHostFingerprints(t *testing.T) {
+	pattern := knownHostsPattern("127.0.0.1", 2222)
+	plainKey := generateHostKey(t)
+	hashKey := generateHostKey(t)
+	otherKey := generateHostKey(t)
+	content := []byte(knownhosts.Line([]string{pattern}, plainKey) + "\n" +
+		knownhosts.Line([]string{knownhosts.HashHostname(pattern)}, hashKey) + "\n" +
+		knownhosts.Line([]string{"other.example"}, otherKey) + "\n")
 
-	// Removing from a missing file is not an error.
-	if err := removeKnownHostEntries(context.Background(), filepath.Join(dir, "missing"), pattern); err != nil {
-		t.Errorf("missing file must not error: %v", err)
+	got := matchingKnownHostFingerprints(content, pattern)
+	want := map[string]bool{
+		ssh.FingerprintSHA256(plainKey): true,
+		ssh.FingerprintSHA256(hashKey):  true,
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 matching fingerprints (plain+hashed), got %v", got)
+	}
+	for _, fp := range got {
+		if !want[fp] {
+			t.Errorf("unexpected fingerprint %s", fp)
+		}
+	}
+	if first := firstMatchingFingerprint(content, pattern); first == "" {
+		t.Error("firstMatchingFingerprint must find an entry")
+	}
+	if first := firstMatchingFingerprint(nil, pattern); first != "" {
+		t.Error("empty file must have no matching fingerprint")
 	}
 }

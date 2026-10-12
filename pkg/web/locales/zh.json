@@ -598,6 +598,8 @@
   "servers.errors.host_key_changed": "此服务器的 SSH 主机密钥已更改。请在接受前核实新的指纹。",
   "servers.errors.host_key_mismatch": "主机密钥再次更改，与显示的指纹不再一致。请重新加载并再次核实。",
   "servers.errors.no_pending_host_key": "此服务器没有待处理的主机密钥更改。",
+  "servers.errors.host_key_accept_busy": "该服务器已有一个主机密钥接受操作正在进行。请等待其完成后重试。",
+  "servers.errors.host_key_stale": "接受密钥期间服务器配置发生了变化。请重新加载服务器列表后再试。",
   "servers.errors.config_not_applied": "无法将配置应用到此服务器，因此未重启 Fail2ban。",
   "servers.jail_local_warning": "警告：jail.local 不由 Fail2ban-UI 管理。将每个 jail 移动到 jail.d/ 下的独立文件中，并删除 jail.local，以便 Fail2ban-UI 可以重新创建它（在设置页面点击一次保存以写入文件）。请参阅文档了解权限要求。",
   "servers.actions.restart": "重启 Fail2ban",

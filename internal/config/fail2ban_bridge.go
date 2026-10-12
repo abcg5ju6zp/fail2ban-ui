@@ -16,7 +16,10 @@
 
 package config
 
-import "github.com/swissmakers/fail2ban-ui/internal/fail2ban"
+import (
+	"github.com/swissmakers/fail2ban-ui/internal/fail2ban"
+	"github.com/swissmakers/fail2ban-ui/internal/shared"
+)
 
 // =========================================================================
 //  Bridge between config and fail2ban --> used for both dependency injection and manager reload orchestration.
@@ -54,6 +57,11 @@ func (fail2banRuntime) BuildJailLocalContent() string {
 
 func registerFail2banProvider() {
 	fail2ban.SetProvider(fail2banRuntime{})
+	// Lets an in-flight host-key accept verify it still owns the current
+	// server configuration generation before it commits known_hosts.
+	fail2ban.SetServerConfigLookup(func(id string) (shared.Fail2banServer, bool) {
+		return GetServerByID(id)
+	})
 }
 
 func ReloadFail2banManager() error {

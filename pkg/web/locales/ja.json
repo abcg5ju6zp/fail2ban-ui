@@ -598,6 +598,8 @@
   "servers.errors.host_key_changed": "このサーバーのSSHホストキーが変更されました。承認する前に新しいフィンガープリントを確認してください。",
   "servers.errors.host_key_mismatch": "ホストキーが再度変更され、表示されているフィンガープリントと一致しなくなりました。再読み込みして再確認してください。",
   "servers.errors.no_pending_host_key": "このサーバーに保留中のホストキー変更はありません。",
+  "servers.errors.host_key_accept_busy": "このサーバーのホストキー承認は既に実行中です。完了してからもう一度お試しください。",
+  "servers.errors.host_key_stale": "キーの承認中にサーバー設定が変更されました。サーバー一覧を再読み込みしてやり直してください。",
   "servers.errors.config_not_applied": "このサーバーに設定を適用できなかったため、Fail2ban は再起動されませんでした。",
   "servers.jail_local_warning": "警告: jail.localはFail2ban-UIで管理されていません。各Jailをjail.d/以下の個別ファイルに移動し、jail.localを削除してFail2ban-UIが再作成できるようにしてください（設定ページで一度保存してください）。権限についてはドキュメントを参照してください。",
   "servers.actions.restart": "Fail2banを再起動",

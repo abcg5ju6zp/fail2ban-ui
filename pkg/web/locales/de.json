@@ -595,6 +595,8 @@
   "servers.errors.host_key_changed": "Der SSH-Hostschlüssel dieses Servers hat sich geändert. Überprüfen Sie den neuen Fingerprint, bevor Sie ihn akzeptieren.",
   "servers.errors.host_key_mismatch": "Der Hostschlüssel hat sich erneut geändert und stimmt nicht mehr mit dem angezeigten Fingerprint überein. Bitte neu laden und erneut prüfen.",
   "servers.errors.no_pending_host_key": "Keine ausstehende Hostschlüssel-Änderung für diesen Server.",
+  "servers.errors.host_key_accept_busy": "Für diesen Server läuft bereits eine Hostschlüssel-Bestätigung. Warte, bis sie abgeschlossen ist, und versuche es erneut.",
+  "servers.errors.host_key_stale": "Die Serverkonfiguration hat sich während der Bestätigung geändert. Bitte Serverliste neu laden und erneut versuchen.",
   "servers.errors.config_not_applied": "Die Konfiguration konnte auf diesem Server nicht angewendet werden, daher wurde Fail2ban nicht neu gestartet.",
   "servers.jail_local_warning": "Warnung: jail.local wird nicht von Fail2ban-UI verwaltet. Verschiebe jeden Jail in eine eigene Datei unter jail.d/ und lösche jail.local, damit Fail2ban-UI sie neu erstellen kann (einmal auf der Einstellungen-Seite speichern, um die Datei zu schreiben). Siehe Dokumentation für Berechtigungen.",
   "servers.actions.restart": "Fail2ban neu starten",

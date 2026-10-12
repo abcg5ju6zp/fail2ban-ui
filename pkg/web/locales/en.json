@@ -598,6 +598,8 @@
   "servers.errors.host_key_changed": "The SSH host key of this server has changed. Verify the new fingerprint before accepting it.",
   "servers.errors.host_key_mismatch": "The host key changed again and no longer matches the displayed fingerprint. Reload and verify again.",
   "servers.errors.no_pending_host_key": "No pending host key change for this server.",
+  "servers.errors.host_key_accept_busy": "Another host key acceptance for this server is already in progress. Wait for it to finish and retry.",
+  "servers.errors.host_key_stale": "The server configuration changed while accepting the key. Reload the server list and try again.",
   "servers.errors.config_not_applied": "The configuration could not be applied to this server, so Fail2ban was not restarted.",
   "servers.jail_local_warning": "Warning: jail.local is not managed by Fail2ban-UI. Move each jail into its own file under jail.d/ and delete jail.local so Fail2ban-UI can recreate it (hit once save on the settings page to write the file). See docs for permissions.",
   "servers.actions.restart": "Restart Fail2ban",

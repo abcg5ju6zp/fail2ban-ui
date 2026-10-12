@@ -370,19 +370,48 @@ func AcceptHostKeyHandler(c *gin.Context) {
 	defer cancel()
 	accepted, err := fail2ban.AcceptHostKey(ctx, server, fingerprint)
 	if err != nil {
-		status := http.StatusInternalServerError
 		var mismatch *fail2ban.HostKeyMismatchError
-		if errors.As(err, &mismatch) {
-			status = http.StatusConflict
-			c.JSON(status, gin.H{
+		switch {
+		case errors.As(err, &mismatch):
+			c.JSON(http.StatusConflict, gin.H{
 				"error":              mismatch.Error(),
 				"messageKey":         "servers.errors.host_key_mismatch",
 				"hostKeyFingerprint": mismatch.Presented,
 			})
 			return
+		case errors.Is(err, fail2ban.ErrNoPendingHostKey):
+			c.JSON(http.StatusConflict, gin.H{
+				"error":      err.Error(),
+				"messageKey": "servers.errors.no_pending_host_key",
+			})
+			return
+		case errors.Is(err, fail2ban.ErrHostKeyAcceptBusy):
+			c.JSON(http.StatusConflict, gin.H{
+				"error":      err.Error(),
+				"messageKey": "servers.errors.host_key_accept_busy",
+			})
+			return
+		default:
+			var stale *fail2ban.HostKeyAcceptStaleError
+			if errors.As(err, &stale) {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":      stale.Error(),
+					"messageKey": "servers.errors.host_key_stale",
+				})
+				return
+			}
+			resp := buildErrorResponse(err, "servers.actions.accept_hostkey_failed")
+			// A failed check restored the trusted file and kept a retryable
+			// alert: hand the banner fingerprint back so the page stays actionable.
+			if issue := fail2ban.HostKeyIssue(id); issue != nil {
+				resp["hostKeyError"] = issue.Error()
+				if issue.Fingerprint != "" {
+					resp["hostKeyFingerprint"] = issue.Fingerprint
+				}
+			}
+			c.JSON(http.StatusInternalServerError, resp)
+			return
 		}
-		c.JSON(status, buildErrorResponse(err, "servers.actions.accept_hostkey_failed"))
-		return
 	}
 	// The pinned key unblocks any config sync that failed on the mismatch
 	manager := fail2ban.GetManager()

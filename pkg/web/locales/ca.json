@@ -595,6 +595,8 @@
   "servers.errors.host_key_changed": "La clau de host SSH d'aquest servidor ha canviat. Verifiqueu la nova empremta abans d'acceptar-la.",
   "servers.errors.host_key_mismatch": "La clau de host ha tornat a canviar i ja no coincideix amb l'empremta mostrada. Torneu a carregar i verifiqueu de nou.",
   "servers.errors.no_pending_host_key": "No hi ha cap canvi de clau de host pendent per a aquest servidor.",
+  "servers.errors.host_key_accept_busy": "Una altra acceptació de clau de host per a aquest servidor està en curs. Espera que acabi i torna-ho a provar.",
+  "servers.errors.host_key_stale": "La configuració del servidor ha canviat mentre s'acceptava la clau. Torna a carregar la llista de servidors i prova-ho de nou.",
   "servers.errors.config_not_applied": "No s'ha pogut aplicar la configuració en aquest servidor, per això no s'ha reiniciat Fail2ban.",
   "servers.jail_local_warning": "Avís: jail.local no està gestionat per Fail2ban-UI. Moveu cada jail al seu propi fitxer a jail.d/ i suprimiu jail.local perquè Fail2ban-UI el pugui tornar a crear (premeu una vegada Desar a la pàgina de configuració per escriure el fitxer). Vegeu la documentació per a temes de permisos.",
   "servers.actions.restart": "Reinicia Fail2ban",

@@ -358,7 +358,7 @@ func (sc *SSHConnector) runRemoteCommandOnce(ctx context.Context, command []stri
 		}
 		return output, stderr, err
 	}
-	ClearHostKeyIssue(sc.server.ID)
+	SettleHostKeyIssue(sc.server.ID)
 	if s := strings.TrimSpace(stderr); s != "" {
 		debugf("SSH stderr ignored [%s]: %s", sc.server.Name, truncateForLog(s, maxLoggedOutputBytes))
 	}

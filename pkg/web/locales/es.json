@@ -595,6 +595,8 @@
   "servers.errors.host_key_changed": "La clave de host SSH de este servidor ha cambiado. Verifique la nueva huella digital antes de aceptarla.",
   "servers.errors.host_key_mismatch": "La clave de host ha vuelto a cambiar y ya no coincide con la huella mostrada. Recargue y verifique de nuevo.",
   "servers.errors.no_pending_host_key": "No hay ningún cambio de clave de host pendiente para este servidor.",
+  "servers.errors.host_key_accept_busy": "Ya hay una aceptación de clave de host en curso para este servidor. Espera a que termine e inténtalo de nuevo.",
+  "servers.errors.host_key_stale": "La configuración del servidor cambió durante la aceptación de la clave. Vuelve a cargar la lista de servidores e inténtalo de nuevo.",
   "servers.errors.config_not_applied": "No se pudo aplicar la configuración en este servidor, por lo que Fail2ban no se reinició.",
   "servers.jail_local_warning": "Advertencia: jail.local no está gestionado por Fail2ban-UI. Mueva cada jail a su propio archivo en jail.d/ y elimine jail.local para que Fail2ban-UI pueda recrearlo (pulse una vez en la página de configuración para escribir el archivo). Consulte la documentación para permisos.",
   "servers.actions.restart": "Reiniciar Fail2ban",

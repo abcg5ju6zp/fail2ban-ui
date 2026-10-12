@@ -136,6 +136,9 @@ func (m *Manager) ReloadFromServers(servers []shared.Fail2banServer) error {
 		keep[srv.ID] = struct{}{}
 	}
 	pruneHostKeyIssues(keep)
+	// Restore durable host-key banners (e.g. after a restart) and drop rows
+	// whose server coordinates no longer exist.
+	LoadPersistentHostKeyIssues(servers)
 
 	var added []string
 	for _, srv := range servers {

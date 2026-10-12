@@ -313,6 +313,9 @@ func Init(dbPath string) error {
 		if initErr = ensureSnapshotSchema(context.Background()); initErr != nil {
 			return
 		}
+		if initErr = ensureHostKeyAlertSchema(context.Background()); initErr != nil {
+			return
+		}
 		if initErr = migrateLegacyTimestamps(context.Background()); initErr != nil {
 			return
 		}

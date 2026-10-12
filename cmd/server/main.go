@@ -85,6 +85,10 @@ func main() {
 		}
 	}()
 
+	// Resume permanent firewall actions interrupted by a restart/cancel and
+	// periodically backfill outcomes that missed their SQLite write.
+	web.StartPermanentActionRecovery(ctx)
+
 	// Sync local/SSH/agent runtime config and reload so callbacks and defaults become active
 	startupSyncDone := make(chan struct{})
 	go func() {
@@ -208,6 +212,11 @@ func main() {
 	<-startupSyncDone
 	if err := web.CloseOperations(shutdownCtx); err != nil {
 		log.Printf("background operations will reconcile on restart: %v", err)
+	}
+	// Give outcomes that only await their SQLite write a last chance to land
+	// without issuing any additional firewall calls.
+	if err := storage.FlushPendingPermanentBlocks(shutdownCtx); err != nil {
+		log.Printf("permanent block writeback will continue on restart: %v", err)
 	}
 	fail2ban.GetManager().Close()
 	log.Println("Fail2Ban-UI stopped.")

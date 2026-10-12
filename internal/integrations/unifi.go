@@ -227,6 +227,34 @@ func (u *unifiIntegration) UnblockIP(req Request) error {
 	return u.updateList(req, list)
 }
 
+// IsIPBlocked reports whether the IP is a member of the configured traffic
+// matching list.
+func (u *unifiIntegration) IsIPBlocked(req Request) (bool, error) {
+	if err := u.Validate(req.Config); err != nil {
+		return false, err
+	}
+	if err := shared.ValidateIP(req.IP); err != nil {
+		return false, fmt.Errorf("unifi lookup: %w", err)
+	}
+
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	list, err := u.findList(req)
+	if err != nil {
+		return false, err
+	}
+	if list == nil {
+		return false, nil
+	}
+	for _, item := range list.Items {
+		if item.Type == "IP_ADDRESS" && item.Value == req.IP {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (u *unifiIntegration) getSiteID(req Request) (string, error) {
 	cfg := req.Config.UniFi
 
@@ -493,7 +521,7 @@ func (u *unifiIntegration) createList(req Request, ip string) error {
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("UniFi API request failed: %w", err)
+		return MarkUncertain(fmt.Errorf("UniFi API request failed: %w", err))
 	}
 	defer resp.Body.Close()
 
@@ -503,11 +531,15 @@ func (u *unifiIntegration) createList(req Request, ip string) error {
 	}
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf(
-			"failed to create UniFi traffic matching list: status %s, response: %s",
-			resp.Status,
+		apiErr := fmt.Errorf(
+			"failed to create UniFi traffic matching list: status %d, response: %s",
+			resp.StatusCode,
 			strings.TrimSpace(string(body)),
 		)
+		if ResponseStatusUncertain(resp.StatusCode) || req.Context != nil && req.Context.Err() != nil {
+			return MarkUncertain(apiErr)
+		}
+		return apiErr
 	}
 
 	if req.Logger != nil {
@@ -574,7 +606,7 @@ func (u *unifiIntegration) updateList(
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return MarkUncertain(fmt.Errorf("request failed: %w", err))
 	}
 	defer resp.Body.Close()
 
@@ -584,11 +616,15 @@ func (u *unifiIntegration) updateList(
 	}
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf(
-			"failed to update UniFi traffic matching list: status %s, response: %s",
-			resp.Status,
+		apiErr := fmt.Errorf(
+			"failed to update UniFi traffic matching list: status %d, response: %s",
+			resp.StatusCode,
 			strings.TrimSpace(string(body)),
 		)
+		if ResponseStatusUncertain(resp.StatusCode) || req.Context != nil && req.Context.Err() != nil {
+			return MarkUncertain(apiErr)
+		}
+		return apiErr
 	}
 
 	return nil

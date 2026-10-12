@@ -178,7 +178,9 @@ func TestSchemaMatchesExpectedColumns(t *testing.T) {
 			"logs", "callback_id", "event_type", "occurred_at", "created_at",
 		},
 		"permanent_blocks": {
-			"id", "ip", "integration", "status", "details", "message", "server_id", "created_at", "updated_at",
+			"id", "ip", "integration", "status", "details", "message", "server_id",
+			"desired_action", "generation", "phase", "attempts", "confirmed_at",
+			"created_at", "updated_at",
 		},
 	}
 

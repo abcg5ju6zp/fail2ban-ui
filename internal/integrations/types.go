@@ -18,7 +18,9 @@ package integrations
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -36,6 +38,48 @@ type Request struct {
 	IP      string
 	Config  config.AdvancedActionsConfig
 	Logger  func(format string, args ...interface{})
+}
+
+// =========================================================================
+//  Outcome classification
+// =========================================================================
+
+var (
+	// ErrAlreadyBlocked reports that the integration already holds the rule
+	// a block requested — a confirmed fact, not a failure.
+	ErrAlreadyBlocked = errors.New("integration already holds this block")
+	// ErrOutcomeUncertain wraps transport/server failures that happened while
+	// a mutating request was in flight: the rule may or may not exist.
+	ErrOutcomeUncertain = errors.New("integration response was inconclusive")
+)
+
+// MarkUncertain annotates err so callers verify integration-side facts
+// instead of assuming the mutation failed or succeeded.
+func MarkUncertain(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrOutcomeUncertain) {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrOutcomeUncertain, err)
+}
+
+// ResponseStatusUncertain reports whether an HTTP status leaves the server
+// side mutation state undetermined (timeouts, rate limiting, 5xx errors).
+func ResponseStatusUncertain(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
+}
+
+// ContextFor returns the request context, falling back to background when
+// the integration is invoked without one.
+func ContextFor(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // =========================================================================
@@ -103,6 +147,13 @@ type Integration interface {
 	BlockIP(req Request) error
 	UnblockIP(req Request) error
 	Validate(cfg config.AdvancedActionsConfig) error
+}
+
+// StateChecker is implemented by integrations that can report the current
+// remote rule state. It is consulted whenever a mutating response is
+// inconclusive, instead of blindly repeating the action.
+type StateChecker interface {
+	IsIPBlocked(req Request) (bool, error)
 }
 
 var registry = map[string]Integration{}

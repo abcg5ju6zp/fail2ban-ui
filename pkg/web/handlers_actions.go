@@ -17,11 +17,13 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/swissmakers/fail2ban-ui/internal/config"
@@ -105,39 +107,39 @@ func ManualAdvancedActionHandler(c *gin.Context) {
 		return
 	}
 
-	// Checks if the IP is already blocked before attempting the action (for block action only)
-	skipLoggingIfAlreadyBlocked := false
-	if action == "block" && settings.AdvancedActions.Integration != "" {
-		active, checkErr := storage.IsPermanentBlockActive(c.Request.Context(), req.IP, settings.AdvancedActions.Integration)
-		if checkErr == nil && active {
-			skipLoggingIfAlreadyBlocked = true
-		}
-	}
-
-	err := runAdvancedIntegrationAction(
+	// Manual, bulk and automatic entries share the same recoverable commit
+	// keyed by (integration, IP); "already blocked" is resolved there.
+	result := commitPermanentAction(
 		c.Request.Context(),
+		settings,
 		action,
 		req.IP,
-		settings,
 		"",
 		map[string]any{"manual": true},
-		skipLoggingIfAlreadyBlocked,
 	)
-	if err != nil {
-		if skipLoggingIfAlreadyBlocked {
-			errMsg := strings.ToLower(err.Error())
-			if strings.Contains(errMsg, "already have such entry") ||
-				strings.Contains(errMsg, "already exists") ||
-				strings.Contains(errMsg, "duplicate") {
-				// IP is already blocked, returns info message with original error
-				c.JSON(http.StatusOK, gin.H{"message": err.Error(), "info": true})
-				return
-			}
+
+	switch {
+	case result.AlreadyDone && action == "block":
+		c.JSON(http.StatusOK, gin.H{
+			"message": fmt.Sprintf("IP %s is already permanently blocked on %s", req.IP, settings.AdvancedActions.Integration),
+			"info":    true,
+			"status":  result.Status,
+		})
+	case result.Superseded:
+		c.JSON(http.StatusOK, gin.H{
+			"message": fmt.Sprintf("Action %s for %s was superseded by a newer action", action, req.IP),
+			"info":    true,
+			"status":  result.Status,
+		})
+	case result.Err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": result.Err.Error(), "status": result.Status})
+	default:
+		message := fmt.Sprintf("Action %s completed for %s", action, req.IP)
+		if result.RecordPending {
+			message = fmt.Sprintf("Action %s completed for %s (record being written)", action, req.IP)
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		c.JSON(http.StatusOK, gin.H{"message": message, "status": result.Status})
 	}
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Action %s completed for %s", action, req.IP)})
 }
 
 const bulkBlockMaxIPs = 500
@@ -197,7 +199,7 @@ func BulkPermanentBlockHandler(c *gin.Context) {
 		"skipped": 0, "invalid": 0, "failed": 0, "aborted": 0,
 	}
 
-	ctx := c.Request.Context()
+	reqCtx := c.Request.Context()
 	consecutiveErrors := 0
 	lastErrorMsg := ""
 	aborted := false
@@ -217,36 +219,58 @@ func BulkPermanentBlockHandler(c *gin.Context) {
 			summary["invalid"]++
 			continue
 		}
-		if active, err := storage.IsPermanentBlockActive(ctx, ip, settings.AdvancedActions.Integration); err == nil && active {
-			results = append(results, bulkBlockResult{IP: ip, Status: "already_blocked"})
-			summary["alreadyBlocked"]++
+
+		// A canceled or aborted request never starts another external call.
+		// Items already started run with a detached context so their real
+		// phase is preserved and written back instead of being forgotten.
+		if reqCtx.Err() != nil {
+			aborted = true
+			results = append(results, bulkBlockResult{IP: ip, Status: "aborted", Message: "request canceled"})
+			summary["aborted"]++
 			continue
 		}
 
-		err := runAdvancedIntegrationAction(ctx, "block", ip, settings, "", map[string]any{
+		itemCtx, cancelItem := context.WithTimeout(context.WithoutCancel(reqCtx), 30*time.Second)
+		result := commitPermanentAction(itemCtx, settings, "block", ip, "", map[string]any{
 			"reason":    "bulk_insights",
 			"user":      actingUser,
 			"batchSize": len(ips),
-		}, false)
-		if err != nil {
-			results = append(results, bulkBlockResult{IP: ip, Status: "error", Message: err.Error()})
+		})
+		cancelItem()
+
+		switch {
+		case result.Err == nil && result.AlreadyDone:
+			results = append(results, bulkBlockResult{IP: ip, Status: "already_blocked"})
+			summary["alreadyBlocked"]++
+			consecutiveErrors = 0
+			lastErrorMsg = ""
+		case result.Err == nil:
+			results = append(results, bulkBlockResult{IP: ip, Status: "blocked"})
+			summary["blocked"]++
+			consecutiveErrors = 0
+			lastErrorMsg = ""
+		default:
+			results = append(results, bulkBlockResult{IP: ip, Status: "error", Message: result.Err.Error()})
 			summary["failed"]++
-			if err.Error() == lastErrorMsg {
+			if result.Err.Error() == lastErrorMsg {
 				consecutiveErrors++
 			} else {
 				consecutiveErrors = 1
-				lastErrorMsg = err.Error()
+				lastErrorMsg = result.Err.Error()
 			}
 			if consecutiveErrors >= bulkBlockAbortThreshold {
 				aborted = true
 			}
-			continue
 		}
-		consecutiveErrors = 0
-		lastErrorMsg = ""
-		results = append(results, bulkBlockResult{IP: ip, Status: "blocked"})
-		summary["blocked"]++
 	}
+
+	// Land outcomes that succeeded externally but missed their first write
+	// before reporting, without ever re-calling the firewall.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := storage.FlushPendingPermanentBlocks(flushCtx); err != nil {
+		log.Printf("WARNING: bulk permanent block writeback incomplete: %v", err)
+	}
+	cancelFlush()
 
 	log.Printf("Bulk permanent block: user=%s requested=%d blocked=%d alreadyBlocked=%d skipped=%d invalid=%d failed=%d aborted=%d",
 		actingUser, summary["requested"], summary["blocked"], summary["alreadyBlocked"],

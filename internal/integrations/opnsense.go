@@ -82,6 +82,80 @@ func (o *opnsenseIntegration) UnblockIP(req Request) error {
 	return o.callAPI(req, "delete", req.IP)
 }
 
+// IsIPBlocked reports whether the IP is listed in the configured alias.
+func (o *opnsenseIntegration) IsIPBlocked(req Request) (bool, error) {
+	if err := o.Validate(req.Config); err != nil {
+		return false, err
+	}
+	if err := shared.ValidateIP(req.IP); err != nil {
+		return false, fmt.Errorf("opnsense lookup: %w", err)
+	}
+	cfg := req.Config.OPNsense
+	if err := ValidateOutboundURL(cfg.BaseURL, "OPNsense base URL"); err != nil {
+		return false, err
+	}
+	if err := ValidateIdentifier(cfg.Alias, "OPNsense alias"); err != nil {
+		return false, err
+	}
+	base, err := url.Parse(cfg.BaseURL)
+	if err != nil {
+		return false, fmt.Errorf("invalid OPNsense base URL: %w", err)
+	}
+	apiURL := base.JoinPath("api", "firewall", "alias_util", "list", cfg.Alias).String()
+
+	httpClient := httpx.Client(10*time.Second, cfg.SkipTLSVerify)
+	httpReq, err := http.NewRequestWithContext(ContextFor(req.Context), http.MethodGet, apiURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create OPNsense request: %w", err)
+	}
+	auth := base64.StdEncoding.EncodeToString([]byte(cfg.APIKey + ":" + cfg.APISecret))
+	httpReq.Header.Set("Authorization", "Basic "+auth)
+
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return false, fmt.Errorf("OPNsense API request to %s failed: %w", apiURL, err)
+	}
+	defer resp.Body.Close()
+	bodyBytes, _ := httpx.ReadLimited(resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		// Alias does not exist, so it cannot contain the IP.
+		return false, nil
+	}
+	if resp.StatusCode >= 300 {
+		return false, fmt.Errorf("OPNsense API request failed: status %s", resp.Status)
+	}
+
+	// The list payload nests entries in different shapes across releases;
+	// accept every one of them.
+	var payload struct {
+		Rows []struct {
+			IP      string `json:"ip"`
+			Address string `json:"address"`
+			Value   string `json:"value"`
+		} `json:"rows"`
+		Data []struct {
+			IP      string `json:"ip"`
+			Address string `json:"address"`
+			Value   string `json:"value"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		return false, fmt.Errorf("failed to decode OPNsense alias list: %w", err)
+	}
+	for _, entry := range payload.Rows {
+		if entry.IP == req.IP || entry.Address == req.IP || entry.Value == req.IP {
+			return true, nil
+		}
+	}
+	for _, entry := range payload.Data {
+		if entry.IP == req.IP || entry.Address == req.IP || entry.Value == req.IP {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // =========================================================================
 //  OPNsense API
 // =========================================================================
@@ -114,7 +188,7 @@ func (o *opnsenseIntegration) callAPI(req Request, action, ip string) error {
 		req.Logger("Calling OPNsense API %s action=%s payload=%s", apiURL, action, string(data))
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(data))
+	httpReq, err := http.NewRequestWithContext(ContextFor(req.Context), http.MethodPost, apiURL, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to create OPNsense request: %w", err)
 	}
@@ -124,24 +198,21 @@ func (o *opnsenseIntegration) callAPI(req Request, action, ip string) error {
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		// Provide more specific error messages for connection issues
-		if netErr, ok := err.(interface {
-			Timeout() bool
-			Error() string
-		}); ok && netErr.Timeout() {
-			return fmt.Errorf("OPNsense API request to %s timed out: %w", apiURL, err)
-		}
-		return fmt.Errorf("OPNsense API request to %s failed: %w (check base URL, network connectivity, and API credentials)", apiURL, err)
+		return MarkUncertain(fmt.Errorf("OPNsense API request to %s failed: %w (check base URL, network connectivity, and API credentials)", apiURL, err))
 	}
 	defer resp.Body.Close()
 	bodyBytes, _ := httpx.ReadLimited(resp.Body)
 	bodyStr := strings.TrimSpace(string(bodyBytes))
 
 	if resp.StatusCode >= 300 {
-		if bodyStr != "" {
-			return fmt.Errorf("OPNsense API request failed: status %s, response: %s", resp.Status, bodyStr)
+		apiErr := fmt.Errorf("OPNsense API request failed: status %s, response: %s", resp.Status, bodyStr)
+		if bodyStr == "" {
+			apiErr = fmt.Errorf("OPNsense API request failed: status %s (check API credentials and alias name)", resp.Status)
 		}
-		return fmt.Errorf("OPNsense API request failed: status %s (check API credentials and alias name)", resp.Status)
+		if ResponseStatusUncertain(resp.StatusCode) {
+			return MarkUncertain(apiErr)
+		}
+		return apiErr
 	}
 
 	if req.Logger != nil {

@@ -611,7 +611,8 @@ function loadPermanentBlockLog() {
 function renderPermanentBlockLogRow(block) {
   const statusClass = block.status === 'blocked'
     ? 'text-green-600'
-    : (block.status === 'unblocked' ? 'text-gray-500' : 'text-red-600');
+    : (block.status === 'unblocked' ? 'text-gray-500'
+      : (block.status === 'pending' || block.status === 'unknown' ? 'text-amber-600' : 'text-red-600'));
   const message = block.message ? escapeHtml(block.message) : '';
   return ''
     + '<tr class="border-t">'

@@ -268,15 +268,20 @@ type RecurringIPStat struct {
 }
 
 type PermanentBlockRecord struct {
-	ID          int64     `json:"id"`
-	IP          string    `json:"ip"`
-	Integration string    `json:"integration"`
-	Status      string    `json:"status"`
-	Details     string    `json:"details"`
-	Message     string    `json:"message"`
-	ServerID    string    `json:"serverId"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID            int64     `json:"id"`
+	IP            string    `json:"ip"`
+	Integration   string    `json:"integration"`
+	Status        string    `json:"status"`
+	Details       string    `json:"details"`
+	Message       string    `json:"message"`
+	ServerID      string    `json:"serverId"`
+	DesiredAction string    `json:"desiredAction"`
+	Generation    int64     `json:"generation"`
+	Phase         string    `json:"phase"`
+	Attempts      int64     `json:"attempts"`
+	ConfirmedAt   time.Time `json:"confirmedAt,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // Initialize the database.
@@ -1661,6 +1666,11 @@ var schemaTables = []tableDef{
 			col("details", "TEXT"),
 			col("message", "TEXT"),
 			col("server_id", "TEXT"),
+			colAlter("desired_action", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT ''"),
+			colAlter("generation", "INTEGER NOT NULL", "INTEGER NOT NULL DEFAULT 0"),
+			colAlter("phase", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT ''"),
+			colAlter("attempts", "INTEGER NOT NULL", "INTEGER NOT NULL DEFAULT 0"),
+			col("confirmed_at", "TEXT"),
 			colAlter("created_at", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT ''"),
 			colAlter("updated_at", "TEXT NOT NULL", "TEXT NOT NULL DEFAULT ''"),
 		},
@@ -1751,6 +1761,21 @@ DROP INDEX IF EXISTS idx_perm_blocks_status;
 	if _, err := db.ExecContext(ctx, createIndexes); err != nil {
 		return err
 	}
+
+	// Brings permanent block rows written by older releases onto the
+	// generation/phase state machine without changing their observable status.
+	const backfillPermanentBlocks = `
+UPDATE permanent_blocks
+SET desired_action = CASE status WHEN 'unblocked' THEN 'unblock' ELSE 'block' END,
+    generation = 1,
+    phase = CASE status WHEN 'blocked' THEN 'succeeded' WHEN 'unblocked' THEN 'succeeded' ELSE 'failed' END
+WHERE phase = '' OR generation = 0;
+UPDATE permanent_blocks
+SET confirmed_at = created_at
+WHERE phase = 'succeeded' AND (confirmed_at IS NULL OR confirmed_at = '');`
+	if _, err := db.ExecContext(ctx, backfillPermanentBlocks); err != nil {
+		return fmt.Errorf("failed to backfill permanent block action state: %w", err)
+	}
 	return nil
 }
 
@@ -1778,44 +1803,42 @@ func ensureDirectory(path string) error {
 //  Permanent Blocks Records
 // =========================================================================
 
-// Stores or updates a permanent block entry.
-func UpsertPermanentBlock(ctx context.Context, rec PermanentBlockRecord) error {
-	if db == nil {
-		return errors.New("storage not initialised")
-	}
-	if rec.IP == "" || rec.Integration == "" {
-		return errors.New("ip and integration are required")
-	}
-	now := time.Now().UTC()
-	if rec.CreatedAt.IsZero() {
-		rec.CreatedAt = now
-	}
-	rec.UpdatedAt = now
-	if rec.Status == "" {
-		rec.Status = "blocked"
-	}
 
-	const query = `
-INSERT INTO permanent_blocks (ip, integration, status, details, message, server_id, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(ip, integration) DO UPDATE SET
-	status = excluded.status,
-	details = excluded.details,
-	message = excluded.message,
-	server_id = excluded.server_id,
-	updated_at = excluded.updated_at`
 
-	_, err := db.ExecContext(ctx, query,
-		rec.IP,
-		rec.Integration,
-		rec.Status,
-		rec.Details,
-		rec.Message,
-		rec.ServerID,
-		rec.CreatedAt.Format(time.RFC3339Nano),
-		rec.UpdatedAt.Format(time.RFC3339Nano),
-	)
-	return err
+const permanentBlockColumns = `id, ip, integration, status, details, message, server_id, desired_action, generation, phase, attempts, confirmed_at, created_at, updated_at`
+
+func scanPermanentBlock(row interface {
+	Scan(dest ...any) error
+}) (PermanentBlockRecord, error) {
+	var rec PermanentBlockRecord
+	var createdAt, updatedAt, confirmedAt sql.NullString
+	if err := row.Scan(
+		&rec.ID, &rec.IP, &rec.Integration, &rec.Status, &rec.Details, &rec.Message, &rec.ServerID,
+		&rec.DesiredAction, &rec.Generation, &rec.Phase, &rec.Attempts, &confirmedAt, &createdAt, &updatedAt,
+	); err != nil {
+		return PermanentBlockRecord{}, err
+	}
+	if ts, ok := parseTimestamp(createdAt); ok {
+		rec.CreatedAt = ts
+	}
+	if ts, ok := parseTimestamp(updatedAt); ok {
+		rec.UpdatedAt = ts
+	}
+	if ts, ok := parseTimestamp(confirmedAt); ok {
+		rec.ConfirmedAt = ts
+	}
+	return rec, nil
+}
+
+func parseTimestamp(ns sql.NullString) (time.Time, bool) {
+	if !ns.Valid || ns.String == "" {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, ns.String)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
 }
 
 // Returns a permanent block entry.
@@ -1828,27 +1851,16 @@ func GetPermanentBlock(ctx context.Context, ip, integration string) (PermanentBl
 	}
 
 	row := db.QueryRowContext(ctx, `
-SELECT id, ip, integration, status, details, message, server_id, created_at, updated_at
+SELECT `+permanentBlockColumns+`
 FROM permanent_blocks
 WHERE ip = ? AND integration = ?`, ip, integration)
 
-	var rec PermanentBlockRecord
-	var createdAt, updatedAt sql.NullString
-	if err := row.Scan(&rec.ID, &rec.IP, &rec.Integration, &rec.Status, &rec.Details, &rec.Message, &rec.ServerID, &createdAt, &updatedAt); err != nil {
+	rec, err := scanPermanentBlock(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return PermanentBlockRecord{}, false, nil
 		}
 		return PermanentBlockRecord{}, false, err
-	}
-	if createdAt.Valid {
-		if ts, err := time.Parse(time.RFC3339Nano, createdAt.String); err == nil {
-			rec.CreatedAt = ts
-		}
-	}
-	if updatedAt.Valid {
-		if ts, err := time.Parse(time.RFC3339Nano, updatedAt.String); err == nil {
-			rec.UpdatedAt = ts
-		}
 	}
 	return rec, true, nil
 }
@@ -1866,7 +1878,7 @@ func ListPermanentBlocks(ctx context.Context, limit int) ([]PermanentBlockRecord
 	limit = min(limit, MaxPermanentBlocksLimit)
 
 	rows, err := db.QueryContext(ctx, `
-SELECT id, ip, integration, status, details, message, server_id, created_at, updated_at
+SELECT `+permanentBlockColumns+`
 FROM permanent_blocks
 ORDER BY updated_at DESC
 LIMIT ?`, limit)
@@ -1877,40 +1889,33 @@ LIMIT ?`, limit)
 
 	var records []PermanentBlockRecord
 	for rows.Next() {
-		var rec PermanentBlockRecord
-		var createdAt, updatedAt sql.NullString
-		if err := rows.Scan(&rec.ID, &rec.IP, &rec.Integration, &rec.Status, &rec.Details, &rec.Message, &rec.ServerID, &createdAt, &updatedAt); err != nil {
+		rec, err := scanPermanentBlock(rows)
+		if err != nil {
 			return nil, err
-		}
-		if createdAt.Valid {
-			if ts, err := time.Parse(time.RFC3339Nano, createdAt.String); err == nil {
-				rec.CreatedAt = ts
-			}
-		}
-		if updatedAt.Valid {
-			if ts, err := time.Parse(time.RFC3339Nano, updatedAt.String); err == nil {
-				rec.UpdatedAt = ts
-			}
 		}
 		records = append(records, rec)
 	}
 	return records, rows.Err()
 }
 
-// Returns true when IP is currently blocked by integration.
+// Returns true only when the latest confirmed action for the IP is "block".
+// Pending, unknown and failed rows are not active: entries must converge
+// through the recoverable commit before an IP counts as permanently blocked.
 func IsPermanentBlockActive(ctx context.Context, ip, integration string) (bool, error) {
 	rec, found, err := GetPermanentBlock(ctx, ip, integration)
 	if err != nil || !found {
 		return false, err
 	}
-	return rec.Status == "blocked", nil
+	return rec.Phase == PermanentPhaseSucceeded && rec.DesiredAction == PermanentActionBlock, nil
 }
 
-// Deletes all permanent block records.
+// Deletes all permanent block records together with outcomes waiting to be
+// written back: clearing the log must not resurrect rows through the outbox.
 func ClearPermanentBlocks(ctx context.Context) (int64, error) {
 	if db == nil {
 		return 0, errors.New("storage not initialised")
 	}
+	dropPendingPermanentBlockWrites()
 	res, err := db.ExecContext(ctx, `DELETE FROM permanent_blocks`)
 	if err != nil {
 		return 0, err

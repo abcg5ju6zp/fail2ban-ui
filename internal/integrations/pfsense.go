@@ -18,6 +18,7 @@ package integrations
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -97,6 +98,32 @@ func (p *pfSenseIntegration) UnblockIP(req Request) error {
 	return p.modifyAliasIP(req, req.IP, "", false)
 }
 
+// IsIPBlocked reports whether the IP is a member of the configured alias.
+func (p *pfSenseIntegration) IsIPBlocked(req Request) (bool, error) {
+	if err := p.Validate(req.Config); err != nil {
+		return false, err
+	}
+	if err := shared.ValidateIP(req.IP); err != nil {
+		return false, fmt.Errorf("pfsense lookup: %w", err)
+	}
+	cfg := req.Config.PfSense
+	baseURL := strings.TrimSuffix(cfg.BaseURL, "/")
+	httpClient := httpx.Client(10*time.Second, cfg.SkipTLSVerify)
+	alias, err := p.getAliasByName(ContextFor(req.Context), httpClient, baseURL, cfg.APIToken, cfg.Alias, req.Logger)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, addr := range alias.Address {
+		if addr == req.IP {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // =========================================================================
 //  pfSense API
 // =========================================================================
@@ -109,9 +136,10 @@ func (p *pfSenseIntegration) modifyAliasIP(req Request, ip, description string, 
 	baseURL := strings.TrimSuffix(cfg.BaseURL, "/")
 
 	httpClient := httpx.Client(10*time.Second, cfg.SkipTLSVerify)
+	ctx := ContextFor(req.Context)
 
 	// GET the alias by name
-	alias, err := p.getAliasByName(httpClient, baseURL, cfg.APIToken, cfg.Alias, req.Logger)
+	alias, err := p.getAliasByName(ctx, httpClient, baseURL, cfg.APIToken, cfg.Alias, req.Logger)
 	if err != nil {
 		// If alias doesn't exist, create it automatically
 		if strings.Contains(err.Error(), "not found") {
@@ -125,7 +153,7 @@ func (p *pfSenseIntegration) modifyAliasIP(req Request, ip, description string, 
 				Address: []string{},
 				Detail:  []string{},
 			}
-			createdAlias, createErr := p.createAlias(httpClient, baseURL, cfg.APIToken, newAlias, req.Logger)
+			createdAlias, createErr := p.createAlias(ctx, httpClient, baseURL, cfg.APIToken, newAlias, req.Logger)
 			if createErr != nil {
 				return fmt.Errorf("failed to create alias %s: %w", cfg.Alias, createErr)
 			}
@@ -178,11 +206,11 @@ func (p *pfSenseIntegration) modifyAliasIP(req Request, ip, description string, 
 		alias.Detail = newDetail
 	}
 
-	if err := p.updateAlias(httpClient, baseURL, cfg.APIToken, alias, req.Logger); err != nil {
+	if err := p.updateAlias(ctx, httpClient, baseURL, cfg.APIToken, alias, req.Logger); err != nil {
 		return fmt.Errorf("failed to update alias %s: %w", cfg.Alias, err)
 	}
 
-	if err := p.applyFirewallChanges(httpClient, baseURL, cfg.APIToken, req.Logger); err != nil {
+	if err := p.applyFirewallChanges(ctx, httpClient, baseURL, cfg.APIToken, req.Logger); err != nil {
 		if req.Logger != nil {
 			req.Logger("Warning: failed to apply firewall changes: %v", err)
 		}
@@ -199,7 +227,7 @@ func (p *pfSenseIntegration) modifyAliasIP(req Request, ip, description string, 
 	return nil
 }
 
-func (p *pfSenseIntegration) getAliasByName(client *http.Client, baseURL, apiToken, aliasName string, logger func(string, ...interface{})) (*FirewallAlias, error) {
+func (p *pfSenseIntegration) getAliasByName(ctx context.Context, client *http.Client, baseURL, apiToken, aliasName string, logger func(string, ...interface{})) (*FirewallAlias, error) {
 	apiURL := baseURL + "/api/v2/firewall/aliases"
 
 	u, err := url.Parse(apiURL)
@@ -215,7 +243,7 @@ func (p *pfSenseIntegration) getAliasByName(client *http.Client, baseURL, apiTok
 		logger("Calling pfSense API GET %s", apiURL)
 	}
 
-	httpReq, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pfSense GET request: %w", err)
 	}
@@ -223,12 +251,6 @@ func (p *pfSenseIntegration) getAliasByName(client *http.Client, baseURL, apiTok
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		if netErr, ok := err.(interface {
-			Timeout() bool
-			Error() string
-		}); ok && netErr.Timeout() {
-			return nil, fmt.Errorf("pfSense API request to %s timed out: %w", apiURL, err)
-		}
 		return nil, fmt.Errorf("pfSense API request to %s failed: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
@@ -256,7 +278,7 @@ func (p *pfSenseIntegration) getAliasByName(client *http.Client, baseURL, apiTok
 	return nil, fmt.Errorf("alias %s not found", aliasName)
 }
 
-func (p *pfSenseIntegration) createAlias(client *http.Client, baseURL, apiToken string, alias *FirewallAlias, logger func(string, ...interface{})) (*FirewallAlias, error) {
+func (p *pfSenseIntegration) createAlias(ctx context.Context, client *http.Client, baseURL, apiToken string, alias *FirewallAlias, logger func(string, ...interface{})) (*FirewallAlias, error) {
 	apiURL := baseURL + "/api/v2/firewall/alias"
 
 	postPayload := map[string]interface{}{
@@ -278,7 +300,7 @@ func (p *pfSenseIntegration) createAlias(client *http.Client, baseURL, apiToken 
 		logger("Calling pfSense API POST %s payload=%s", apiURL, string(data))
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(data))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pfSense POST request: %w", err)
 	}
@@ -287,13 +309,7 @@ func (p *pfSenseIntegration) createAlias(client *http.Client, baseURL, apiToken 
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		if netErr, ok := err.(interface {
-			Timeout() bool
-			Error() string
-		}); ok && netErr.Timeout() {
-			return nil, fmt.Errorf("pfSense API request to %s timed out: %w", apiURL, err)
-		}
-		return nil, fmt.Errorf("pfSense API request to %s failed: %w", apiURL, err)
+		return nil, MarkUncertain(fmt.Errorf("pfSense API request to %s failed: %w", apiURL, err))
 	}
 	defer resp.Body.Close()
 
@@ -301,7 +317,11 @@ func (p *pfSenseIntegration) createAlias(client *http.Client, baseURL, apiToken 
 	bodyStr := strings.TrimSpace(string(bodyBytes))
 
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("pfSense API POST failed: status %s, response: %s", resp.Status, bodyStr)
+		err := fmt.Errorf("pfSense API POST failed: status %s, response: %s", resp.Status, bodyStr)
+		if ResponseStatusUncertain(resp.StatusCode) {
+			return nil, MarkUncertain(err)
+		}
+		return nil, err
 	}
 
 	var createResp FirewallAliasResponse
@@ -316,7 +336,7 @@ func (p *pfSenseIntegration) createAlias(client *http.Client, baseURL, apiToken 
 	return &createResp.Data, nil
 }
 
-func (p *pfSenseIntegration) updateAlias(client *http.Client, baseURL, apiToken string, alias *FirewallAlias, logger func(string, ...interface{})) error {
+func (p *pfSenseIntegration) updateAlias(ctx context.Context, client *http.Client, baseURL, apiToken string, alias *FirewallAlias, logger func(string, ...interface{})) error {
 	apiURL := baseURL + "/api/v2/firewall/alias"
 
 	detailToSend := alias.Detail
@@ -345,7 +365,7 @@ func (p *pfSenseIntegration) updateAlias(client *http.Client, baseURL, apiToken 
 		logger("Calling pfSense API PATCH %s payload=%s", apiURL, string(data))
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPatch, apiURL, bytes.NewReader(data))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to create pfSense PATCH request: %w", err)
 	}
@@ -354,13 +374,7 @@ func (p *pfSenseIntegration) updateAlias(client *http.Client, baseURL, apiToken 
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		if netErr, ok := err.(interface {
-			Timeout() bool
-			Error() string
-		}); ok && netErr.Timeout() {
-			return fmt.Errorf("pfSense API request to %s timed out: %w", apiURL, err)
-		}
-		return fmt.Errorf("pfSense API request to %s failed: %w", apiURL, err)
+		return MarkUncertain(fmt.Errorf("pfSense API request to %s failed: %w", apiURL, err))
 	}
 	defer resp.Body.Close()
 
@@ -368,7 +382,11 @@ func (p *pfSenseIntegration) updateAlias(client *http.Client, baseURL, apiToken 
 	bodyStr := strings.TrimSpace(string(bodyBytes))
 
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("pfSense API PATCH failed: status %s, response: %s", resp.Status, bodyStr)
+		err := fmt.Errorf("pfSense API PATCH failed: status %s, response: %s", resp.Status, bodyStr)
+		if ResponseStatusUncertain(resp.StatusCode) {
+			return MarkUncertain(err)
+		}
+		return err
 	}
 
 	if logger != nil {
@@ -379,14 +397,14 @@ func (p *pfSenseIntegration) updateAlias(client *http.Client, baseURL, apiToken 
 }
 
 // Applies firewall changes
-func (p *pfSenseIntegration) applyFirewallChanges(client *http.Client, baseURL, apiToken string, logger func(string, ...interface{})) error {
+func (p *pfSenseIntegration) applyFirewallChanges(ctx context.Context, client *http.Client, baseURL, apiToken string, logger func(string, ...interface{})) error {
 	apiURL := baseURL + "/api/v2/firewall/apply"
 
 	if logger != nil {
 		logger("Calling pfSense API POST %s to apply firewall changes", apiURL)
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, apiURL, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create pfSense apply request: %w", err)
 	}
@@ -394,12 +412,6 @@ func (p *pfSenseIntegration) applyFirewallChanges(client *http.Client, baseURL, 
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		if netErr, ok := err.(interface {
-			Timeout() bool
-			Error() string
-		}); ok && netErr.Timeout() {
-			return fmt.Errorf("pfSense API request to %s timed out: %w", apiURL, err)
-		}
 		return fmt.Errorf("pfSense API request to %s failed: %w", apiURL, err)
 	}
 	defer resp.Body.Close()

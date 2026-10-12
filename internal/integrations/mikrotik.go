@@ -18,10 +18,12 @@ package integrations
 
 import (
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,7 +90,8 @@ func (m *mikrotikIntegration) BlockIP(req Request) error {
 		return fmt.Errorf("mikrotik block: %w", err)
 	}
 	cmd := fmt.Sprintf(`/ip firewall address-list add list=%s address=%s comment="Fail2ban-UI permanent block"`, list, ip)
-	return m.runCommand(req, cmd)
+	output, dispatched, err := m.runCommand(req, cmd)
+	return m.classifyMutationError(err, dispatched, output)
 }
 
 func (m *mikrotikIntegration) UnblockIP(req Request) error {
@@ -100,14 +103,69 @@ func (m *mikrotikIntegration) UnblockIP(req Request) error {
 		return fmt.Errorf("mikrotik unblock: %w", err)
 	}
 	cmd := fmt.Sprintf(`/ip firewall address-list remove [/ip firewall address-list find address=%s list=%s]`, ip, list)
-	return m.runCommand(req, cmd)
+	output, dispatched, err := m.runCommand(req, cmd)
+	return m.classifyMutationError(err, dispatched, output)
+}
+
+// IsIPBlocked reports whether the IP is present in the configured address
+// list by counting matching entries.
+func (m *mikrotikIntegration) IsIPBlocked(req Request) (bool, error) {
+	if err := m.Validate(req.Config); err != nil {
+		return false, err
+	}
+	ip, list, err := safeMikrotikArgs(req.IP, req.Config.Mikrotik.AddressList)
+	if err != nil {
+		return false, fmt.Errorf("mikrotik lookup: %w", err)
+	}
+	cmd := fmt.Sprintf(`:put [/ip firewall address-list print count-only where address=%s and list=%s]`, ip, list)
+	output, _, err := m.runCommand(req, cmd)
+	if err != nil {
+		return false, err
+	}
+	// RouterOS prints a single integer (possibly surrounded by whitespace
+	// or control characters on some terminals).
+	digits := strings.Builder{}
+	for _, ch := range string(output) {
+		if ch >= '0' && ch <= '9' {
+			digits.WriteRune(ch)
+		}
+	}
+	if digits.Len() == 0 {
+		return false, fmt.Errorf("mikrotik lookup returned no count: %q", strings.TrimSpace(string(output)))
+	}
+	count, err := strconv.Atoi(digits.String())
+	if err != nil {
+		return false, fmt.Errorf("mikrotik lookup returned an invalid count: %q", strings.TrimSpace(string(output)))
+	}
+	return count > 0, nil
+}
+
+// Maps RouterOS outcomes onto the integration outcome taxonomy. A command
+// that RouterOS rejected after execution with "already have such entry" is a
+// confirmed block; transport failures after dispatch are uncertain because
+// the command may still have run.
+func (m *mikrotikIntegration) classifyMutationError(err error, dispatched bool, output []byte) error {
+	if err == nil {
+		return nil
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "already have such entry") ||
+		strings.Contains(message, "already exists") ||
+		strings.Contains(message, "failure: already") {
+		return fmt.Errorf("%w: %s", ErrAlreadyBlocked, strings.TrimSpace(string(output)))
+	}
+	var exitErr *ssh.ExitError
+	if dispatched && !errors.As(err, &exitErr) {
+		return MarkUncertain(err)
+	}
+	return err
 }
 
 // =========================================================================
 //  SSH Communication
 // =========================================================================
 
-func (m *mikrotikIntegration) runCommand(req Request, command string) error {
+func (m *mikrotikIntegration) runCommand(req Request, command string) ([]byte, bool, error) {
 	cfg := req.Config.Mikrotik
 
 	authMethods := []ssh.AuthMethod{}
@@ -116,21 +174,21 @@ func (m *mikrotikIntegration) runCommand(req Request, command string) error {
 	}
 	if cfg.SSHKeyPath != "" {
 		if err := shared.ValidateAbsolutePath(cfg.SSHKeyPath, "mikrotik ssh key path"); err != nil {
-			return err
+			return nil, false, err
 		}
 		key, err := os.ReadFile(filepath.Clean(cfg.SSHKeyPath))
 		if err != nil {
-			return fmt.Errorf("failed to read mikrotik ssh key: %w", err)
+			return nil, false, fmt.Errorf("failed to read mikrotik ssh key: %w", err)
 		}
 		signer, err := ssh.ParsePrivateKey(key)
 		if err != nil {
-			return fmt.Errorf("failed to parse mikrotik ssh key: %w", err)
+			return nil, false, fmt.Errorf("failed to parse mikrotik ssh key: %w", err)
 		}
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 
 	if len(authMethods) == 0 {
-		return fmt.Errorf("no authentication method available for mikrotik")
+		return nil, false, fmt.Errorf("no authentication method available for mikrotik")
 	}
 
 	port := cfg.Port
@@ -140,7 +198,7 @@ func (m *mikrotikIntegration) runCommand(req Request, command string) error {
 
 	hostKeyCallback, err := mikrotikHostKeyCallback(cfg.HostKeyFingerprint)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	clientCfg := &ssh.ClientConfig{
 		User:            cfg.Username,
@@ -154,21 +212,21 @@ func (m *mikrotikIntegration) runCommand(req Request, command string) error {
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok {
 			if netErr.Timeout() {
-				return fmt.Errorf("connection to mikrotik at %s timed out: %w", address, err)
+				return nil, false, fmt.Errorf("connection to mikrotik at %s timed out: %w", address, err)
 			}
 		}
 		if opErr, ok := err.(*net.OpError); ok {
 			if opErr.Err != nil {
-				return fmt.Errorf("failed to connect to mikrotik at %s: %v (check host, port %d, and network connectivity)", address, opErr.Err, port)
+				return nil, false, fmt.Errorf("failed to connect to mikrotik at %s: %v (check host, port %d, and network connectivity)", address, opErr.Err, port)
 			}
 		}
-		return fmt.Errorf("failed to connect to mikrotik at %s: %w (check host, port %d, username, and credentials)", address, err, port)
+		return nil, false, fmt.Errorf("failed to connect to mikrotik at %s: %w (check host, port %d, username, and credentials)", address, err, port)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to create mikrotik ssh session: %w", err)
+		return nil, false, fmt.Errorf("failed to create mikrotik ssh session: %w", err)
 	}
 	defer session.Close()
 
@@ -176,14 +234,16 @@ func (m *mikrotikIntegration) runCommand(req Request, command string) error {
 		req.Logger("Running Mikrotik command: %s", command)
 	}
 
+	// The session is established: from here on a transport-level failure
+	// does not prove the command did not execute.
 	output, err := session.CombinedOutput(command)
 	if err != nil {
-		return fmt.Errorf("mikrotik command failed: %w (output: %s)", err, string(output))
+		return output, true, fmt.Errorf("mikrotik command failed: %w (output: %s)", err, string(output))
 	}
 	if req.Logger != nil {
 		req.Logger("Mikrotik command output: %s", string(output))
 	}
-	return nil
+	return output, true, nil
 }
 
 // When fingerprint is empty, host-key verification is skipped. When set, it accepts either an SSH SHA256 fingerprint ("SHA256:...") or full public-key line and verifies the presented key against it.

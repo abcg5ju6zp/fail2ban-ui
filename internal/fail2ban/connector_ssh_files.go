@@ -171,8 +171,8 @@ func buildRemoteWriteScriptMode(filePath, content string, private bool) (string,
 		}
 	}
 	body := strings.TrimSuffix(content, "\n")
-	// Prefer GNU/BusyBox stat, then fall back to BSD stat. chmod --reference is GNU-only.
-	mode := "mode=644; if [ -f \"$target\" ]; then mode=$(stat -c %a \"$target\" 2>/dev/null || stat -f %Lp \"$target\" 2>/dev/null) || mode=644; fi; chmod \"$mode\" \"$tmp\""
+	// stat -c works on GNU and BusyBox; chmod --reference is GNU-only and would abort under set -e.
+	mode := "mode=644; if [ -f \"$target\" ]; then mode=$(stat -c %a \"$target\" 2>/dev/null) || mode=644; fi; chmod \"$mode\" \"$tmp\""
 	if private {
 		mode = "chmod 600 \"$tmp\""
 	}

@@ -104,6 +104,7 @@ func RegisterRoutes(r *gin.Engine, hub *Hub) {
 		api.GET("/servers", RequirePermission(PermissionRead), ListServersHandler)
 		api.POST("/servers", RequirePermission(PermissionAdmin), UpsertServerHandler)
 		api.DELETE("/servers/:id", RequirePermission(PermissionAdmin), DeleteServerHandler)
+		api.GET("/servers/:id/retirement", RequirePermission(PermissionRead), GetServerRetirementHandler)
 		api.POST("/servers/:id/default", RequirePermission(PermissionAdmin), SetDefaultServerHandler)
 		api.GET("/ssh/keys", RequirePermission(PermissionAdmin), ListSSHKeysHandler)
 		api.POST("/servers/:id/test", RequirePermission(PermissionAdmin), TestServerHandler)

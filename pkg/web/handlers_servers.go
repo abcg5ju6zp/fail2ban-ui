@@ -61,7 +61,8 @@ func ListServersHandler(c *gin.Context) {
 	response := make([]serverStatus, 0, len(masked))
 	for _, server := range masked {
 		item := serverStatus{Fail2banServer: server}
-		if server.Enabled {
+		// Retiring servers are frozen: no live health or config-sync state.
+		if server.Enabled && server.RetirementPhase == "" {
 			status := manager.ConfigSyncStatus(server.ID)
 			item.RestartNeeded = status.Phase == fail2ban.SyncWritten
 			item.Health = healthForRole(manager.Health(server.ID), isAdmin)
@@ -140,6 +141,10 @@ func UpsertServerHandler(c *gin.Context) {
 	}
 	server, err := config.UpsertServer(req)
 	if err != nil {
+		if errors.Is(err, config.ErrServerRetiring) {
+			c.JSON(http.StatusConflict, gin.H{"error": "This server is being retired and cannot be edited."})
+			return
+		}
 		resp := gin.H{"error": err.Error()}
 		if errors.Is(err, config.ErrInvalidTunnelPort) {
 			resp["messageKey"] = "servers.errors.invalid_tunnel_port"
@@ -186,7 +191,10 @@ func UpsertServerHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// Removes a server configuration by ID.
+// Starts the recoverable retirement of a server. The configuration is kept
+// until queued/running jobs, config sync and health probes are frozen and the
+// connector released. Repeated calls and already-missing servers are
+// idempotent; the progress is queryable via the retirement endpoint.
 func DeleteServerHandler(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
@@ -196,19 +204,76 @@ func DeleteServerHandler(c *gin.Context) {
 	manager := fail2ban.GetManager()
 	releaseConfig := manager.GuardServerConfiguration()
 	defer releaseConfig()
+
+	// Idempotent: the server (and its retirement record) is already gone.
+	if _, found := config.GetServerByID(id); !found {
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "server already deleted",
+			"retirement": RetirementView{ServerID: id, Phase: config.RetirementRemoved},
+		})
+		return
+	}
+
+	// Idempotent: a retirement is already running; report its current phase.
+	if existing, ok := config.GetServerByID(id); ok && existing.RetirementPhase != "" {
+		if retirementSvc != nil {
+			retirementSvc.trigger()
+		}
+		c.JSON(http.StatusAccepted, gin.H{
+			"message":    "server retirement already in progress",
+			"retirement": retirementView(id),
+		})
+		return
+	}
+
+	// The running-operation conflict prompt stays unchanged. Queued jobs are
+	// not claimed by a gate, so they are cancelled by the retirement flow.
 	if activity, busy := manager.OperationStatus(id); busy {
 		c.JSON(http.StatusConflict, gin.H{"error": "This server has an operation in progress and cannot be deleted until its outcome is confirmed.", "operationId": activity.ID})
 		return
 	}
-	if err := config.DeleteServer(id); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if err := config.ReloadFail2banManager(); err != nil {
+
+	server, _, err := beginRetirement(id)
+	if err != nil {
+		if errors.Is(err, config.ErrServerRetiring) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "server deleted"})
+
+	// Drive the first phases synchronously when no background loop runs
+	// (standalone tests); in production the coordinator goroutine takes over.
+	if retirementSvc == nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		retirementSvcTemp := newRetirementCoordinator(nil)
+		retirementSvcTemp.begin(server)
+		retirementSvcTemp.drive(ctx, id)
+		cancel()
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"message":    "server retirement started",
+		"retirement": retirementView(id),
+	})
+}
+
+// Returns the current, queryable retirement phase of a server.
+func GetServerRetirementHandler(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing id parameter"})
+		return
+	}
+	if _, found := config.GetServerByID(id); !found {
+		c.JSON(http.StatusOK, gin.H{"retirement": RetirementView{ServerID: id, Phase: config.RetirementRemoved}})
+		return
+	}
+	if _, ok := config.GetServerRetirement(id); !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server is not retiring"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"retirement": retirementView(id)})
 }
 
 // Marks a server as the default.
@@ -220,6 +285,10 @@ func SetDefaultServerHandler(c *gin.Context) {
 	}
 	server, err := config.SetDefaultServer(id)
 	if err != nil {
+		if errors.Is(err, config.ErrServerRetiring) {
+			c.JSON(http.StatusConflict, gin.H{"error": "This server is being retired and cannot be set as default."})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -280,6 +349,10 @@ func TestServerHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
 		return
 	}
+	if server.RetirementPhase != "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "server is being retired"})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
@@ -329,6 +402,10 @@ func AcceptHostKeyHandler(c *gin.Context) {
 	server, ok := config.GetServerByID(id)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+	if server.RetirementPhase != "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "server is being retired"})
 		return
 	}
 	if server.Type != "ssh" {

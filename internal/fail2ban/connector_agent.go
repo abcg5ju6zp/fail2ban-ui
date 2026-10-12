@@ -261,10 +261,20 @@ func (ac *AgentConnector) ensureCallbackConfig(ctx context.Context) error {
 func (ac *AgentConnector) deregister() {
 	ctx, cancel := context.WithTimeout(context.Background(), agentDeregisterWait)
 	defer cancel()
-	err := ac.call(ctx, http.MethodDelete, "/v1/callback/config?serverId="+url.QueryEscape(ac.server.ID), agentDeregisterWait, nil, nil)
-	if err != nil && !agentUnsupported(err) {
+	if err := ac.Deregister(ctx); err != nil {
 		log.Printf("warning: failed to deregister callbacks on agent %s: %v", ac.server.Name, err)
 	}
+}
+
+// Deregister asks the agent to stop posting callbacks and returns a retryable
+// error when the agent cannot be reached. Agents predating the endpoint answer
+// 404/405, which counts as success: they cannot post callbacks anyway.
+func (ac *AgentConnector) Deregister(ctx context.Context) error {
+	err := ac.call(ctx, http.MethodDelete, "/v1/callback/config?serverId="+url.QueryEscape(ac.server.ID), agentDeregisterWait, nil, nil)
+	if err != nil && agentUnsupported(err) {
+		return nil
+	}
+	return err
 }
 
 func (ac *AgentConnector) setDrifted(v bool) {

@@ -239,6 +239,10 @@ type ServerRecord struct {
 	TunnelPort           int
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+	RetirementPhase      string
+	RetirementGeneration int64
+	RetirementError      string
+	RetirementUpdatedAt  time.Time
 }
 
 type BanEventRecord struct {
@@ -592,7 +596,7 @@ func ListServers(ctx context.Context) ([]ServerRecord, error) {
 	}
 
 	rows, err := db.QueryContext(ctx, `
-SELECT id, name, type, host, port, socket_path, config_path, ssh_user, ssh_key_path, agent_url, agent_secret, hostname, tags, is_default, enabled, reverse_tunnel, tunnel_port, created_at, updated_at
+SELECT id, name, type, host, port, socket_path, config_path, ssh_user, ssh_key_path, agent_url, agent_secret, hostname, tags, is_default, enabled, reverse_tunnel, tunnel_port, created_at, updated_at, retirement_phase, retirement_generation, retirement_error, retirement_updated_at
 FROM servers
 ORDER BY created_at`)
 	if err != nil {
@@ -604,9 +608,9 @@ ORDER BY created_at`)
 	for rows.Next() {
 		var rec ServerRecord
 		var host, socket, configPath, sshUser, sshKey, agentURL, agentSecret, hostname, tags sql.NullString
-		var name, serverType sql.NullString
+		var name, serverType, retirementPhase, retirementError, retirementUpdated sql.NullString
 		var created, updated sql.NullString
-		var port, tunnelPort sql.NullInt64
+		var port, tunnelPort, retirementGeneration sql.NullInt64
 		var isDefault, enabled, reverseTunnel sql.NullInt64
 
 		if err := rows.Scan(
@@ -629,6 +633,10 @@ ORDER BY created_at`)
 			&tunnelPort,
 			&created,
 			&updated,
+			&retirementPhase,
+			&retirementGeneration,
+			&retirementError,
+			&retirementUpdated,
 		); err != nil {
 			return nil, err
 		}
@@ -649,6 +657,10 @@ ORDER BY created_at`)
 		rec.Enabled = intToBool(intFromNull(enabled))
 		rec.ReverseTunnelEnabled = intToBool(intFromNull(reverseTunnel))
 		rec.TunnelPort = intFromNull(tunnelPort)
+		rec.RetirementPhase = stringFromNull(retirementPhase)
+		rec.RetirementGeneration = int64(intFromNull(retirementGeneration))
+		rec.RetirementError = stringFromNull(retirementError)
+		rec.RetirementUpdatedAt = parseStorageTime(stringFromNull(retirementUpdated))
 
 		if created.Valid {
 			if t, err := time.Parse(time.RFC3339Nano, created.String); err == nil {
@@ -688,9 +700,9 @@ func ReplaceServers(ctx context.Context, servers []ServerRecord) error {
 
 	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO servers (
-	id, name, type, host, port, socket_path, config_path, ssh_user, ssh_key_path, agent_url, agent_secret, hostname, tags, is_default, enabled, reverse_tunnel, tunnel_port, created_at, updated_at
+	id, name, type, host, port, socket_path, config_path, ssh_user, ssh_key_path, agent_url, agent_secret, hostname, tags, is_default, enabled, reverse_tunnel, tunnel_port, created_at, updated_at, retirement_phase, retirement_generation, retirement_error, retirement_updated_at
 ) VALUES (
-	?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+	?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )`)
 	if err != nil {
 		return err
@@ -705,6 +717,10 @@ INSERT INTO servers (
 		updatedAt := srv.UpdatedAt
 		if updatedAt.IsZero() {
 			updatedAt = createdAt
+		}
+		retirementUpdatedAt := ""
+		if !srv.RetirementUpdatedAt.IsZero() {
+			retirementUpdatedAt = srv.RetirementUpdatedAt.Format(time.RFC3339Nano)
 		}
 		if _, err = stmt.ExecContext(ctx,
 			srv.ID,
@@ -726,6 +742,10 @@ INSERT INTO servers (
 			srv.TunnelPort,
 			createdAt.Format(time.RFC3339Nano),
 			updatedAt.Format(time.RFC3339Nano),
+			srv.RetirementPhase,
+			srv.RetirementGeneration,
+			srv.RetirementError,
+			retirementUpdatedAt,
 		); err != nil {
 			return err
 		}
@@ -1630,6 +1650,10 @@ var schemaTables = []tableDef{
 			col("tunnel_port", "INTEGER DEFAULT 0"),
 			col("created_at", "TEXT"),
 			col("updated_at", "TEXT"),
+			colAlter("retirement_phase", "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"),
+			colAlter("retirement_generation", "INTEGER NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"),
+			colAlter("retirement_error", "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"),
+			colAlter("retirement_updated_at", "TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"),
 		},
 	},
 	{

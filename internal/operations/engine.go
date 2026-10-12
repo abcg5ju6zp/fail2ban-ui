@@ -41,11 +41,15 @@ var (
 	ErrConflict            = storage.ErrOperationConflict
 	ErrIdempotencyConflict = storage.ErrIdempotencyConflict
 	ErrNotStarted          = errors.New("operation worker is not running")
+	// ErrServerRetiring is returned when a job is submitted for, or claimed by,
+	// a server whose retirement has been fenced.
+	ErrServerRetiring = errors.New("server is retiring and rejects new operations")
 )
 
 type Engine struct {
 	store           *storage.OperationStore
 	execute         Executor
+	retired         func(serverID string) bool
 	mu              sync.Mutex
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -60,6 +64,21 @@ type Engine struct {
 func New(execute Executor) *Engine { return NewWithStore(storage.SharedOperationStore(), execute) }
 func NewWithStore(store *storage.OperationStore, execute Executor) *Engine {
 	return &Engine{store: store, execute: execute, active: make(map[string]bool), wake: make(chan struct{}, 1), done: make(chan struct{})}
+}
+
+// SetRetirementGate installs the authoritative retirement check. It fences
+// submission, dispatch and late claims against the current generation.
+func (e *Engine) SetRetirementGate(gate func(serverID string) bool) {
+	e.mu.Lock()
+	e.retired = gate
+	e.mu.Unlock()
+}
+
+func (e *Engine) isRetiring(serverID string) bool {
+	e.mu.Lock()
+	gate := e.retired
+	e.mu.Unlock()
+	return gate != nil && gate(serverID)
 }
 
 // SetListener installs a fast, nonblocking notification callback. The durable
@@ -133,6 +152,9 @@ func (e *Engine) Submit(ctx context.Context, serverID, kind, target, idempotency
 	}
 	// Canonical JSON makes a retried request independent of object field order.
 	payload, _ = json.Marshal(parsed)
+	if e.isRetiring(serverID) {
+		return Operation{}, ErrServerRetiring
+	}
 	var entropy [16]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
 		return Operation{}, err
@@ -166,6 +188,22 @@ func (e *Engine) List(ctx context.Context, serverID string, limit int) ([]Operat
 }
 
 func (e *Engine) InFlight(ctx context.Context) ([]Operation, error) { return e.store.InFlight(ctx) }
+
+// CancelQueuedForServer cancels unclaimed jobs of a retiring server and kicks
+// dispatchers so the durable state converges immediately.
+func (e *Engine) CancelQueuedForServer(ctx context.Context, serverID string) (int64, error) {
+	n, err := e.store.CancelQueuedForServer(ctx, serverID)
+	if err == nil && n > 0 {
+		e.kick()
+	}
+	return n, err
+}
+
+// InFlightCountForServer reports running/reconciling jobs that still own the
+// server and must be drained before its connector is released.
+func (e *Engine) InFlightCountForServer(ctx context.Context, serverID string) (int, error) {
+	return e.store.InFlightCountForServer(ctx, serverID)
+}
 func (e *Engine) HasActiveKind(ctx context.Context, serverID, kind string) (bool, error) {
 	return e.store.HasActiveKind(ctx, serverID, kind)
 }
@@ -230,6 +268,9 @@ func (e *Engine) dispatch() {
 			log.Printf("operation queue refresh failed: %v", err)
 		}
 		for _, id := range ids {
+			if e.isRetiring(id) {
+				continue
+			}
 			e.mu.Lock()
 			if e.closed || e.ctx.Err() != nil {
 				e.mu.Unlock()
@@ -260,6 +301,20 @@ func (e *Engine) worker(serverID string) {
 				log.Printf("operation claim for %s failed: %v", serverID, err)
 			}
 			return
+		}
+		// Fence a claim that raced with retirement: verify the generation
+		// before touching the connector and leave the job cancelled, not lost.
+		if e.isRetiring(serverID) {
+			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cancelled, finishErr := e.store.Finish(persistCtx, op.ID, "running", "cancelled",
+				"Cancelled because the server is being retired", "", nil)
+			cancel()
+			if finishErr != nil {
+				log.Printf("could not cancel raced operation %s on retiring server: %v", op.ID, finishErr)
+				return
+			}
+			e.notify(cancelled)
+			continue
 		}
 		e.notify(op)
 		ctx := context.WithValue(e.ctx, executionKey{}, &execution{engine: e, id: op.ID})

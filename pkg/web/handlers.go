@@ -71,6 +71,9 @@ func resolveConnector(c *gin.Context) (fail2ban.Connector, error) {
 func resolveServerForNotification(serverID, hostname string) (config.Fail2banServer, error) {
 	if serverID != "" {
 		if srv, ok := config.GetServerByID(serverID); ok {
+			if srv.RetirementPhase != "" {
+				return config.Fail2banServer{}, fmt.Errorf("server %s is retiring", serverID)
+			}
 			if !srv.Enabled {
 				return config.Fail2banServer{}, fmt.Errorf("server %s is disabled", serverID)
 			}
@@ -80,6 +83,9 @@ func resolveServerForNotification(serverID, hostname string) (config.Fail2banSer
 	}
 	if hostname != "" {
 		if srv, ok := config.GetServerByHostname(hostname); ok {
+			if srv.RetirementPhase != "" {
+				return config.Fail2banServer{}, fmt.Errorf("server for hostname %s is retiring", hostname)
+			}
 			if !srv.Enabled {
 				return config.Fail2banServer{}, fmt.Errorf("server for hostname %s is disabled", hostname)
 			}
@@ -89,6 +95,9 @@ func resolveServerForNotification(serverID, hostname string) (config.Fail2banSer
 	srv := config.GetDefaultServer()
 	if srv.ID == "" {
 		return config.Fail2banServer{}, fmt.Errorf("no default fail2ban server configured")
+	}
+	if srv.RetirementPhase != "" {
+		return config.Fail2banServer{}, fmt.Errorf("default fail2ban server is retiring")
 	}
 	if !srv.Enabled {
 		return config.Fail2banServer{}, fmt.Errorf("default fail2ban server is disabled")

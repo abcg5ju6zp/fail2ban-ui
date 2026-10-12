@@ -393,6 +393,9 @@ function renderServerManagerList() {
     var restartBadge = server.restartNeeded
       ? '<span class="ml-2 text-xs font-semibold text-yellow-600" data-i18n="servers.badge.restart_needed">Restart required</span>'
       : '';
+    var retirementBadge = server.retirementPhase
+      ? '<span class="ml-2 text-xs font-semibold text-orange-600" title="' + escapeHtml(server.retirementPhase || '') + '" data-i18n="servers.badge.retiring">Retiring</span>'
+      : '';
     var descriptor = [];
     if (server.type) {
       descriptor.push(server.type.toUpperCase());
@@ -428,7 +431,7 @@ function renderServerManagerList() {
       + '<div class="border border-gray-200 p-4 min-w-0 bg-gray-50">'
       + '  <div class="flex flex-col gap-3 min-w-0">'
       + '    <div class="min-w-0">'
-      + '      <p class="font-semibold text-gray-800 flex flex-wrap items-center"><span class="min-w-0 break-all">' + escapeHtml(server.name || server.id) + '</span>' + defaultBadge + statusBadge + restartBadge + '</p>'
+      + '      <p class="font-semibold text-gray-800 flex flex-wrap items-center"><span class="min-w-0 break-all">' + escapeHtml(server.name || server.id) + '</span>' + defaultBadge + statusBadge + restartBadge + retirementBadge + '</p>'
       + '      <p class="text-sm text-gray-500 break-all">' + escapeHtml(meta || server.id) + '</p>'
       + '      <p class="mt-1 text-xs text-gray-500">'
       + '<span data-i18n="servers.card.server_id">Server-ID</span>: '
@@ -1037,6 +1040,26 @@ function acceptHostKey(serverId) {
     });
 }
 
+function pollServerRetirement(serverId, attempt) {
+  attempt = attempt || 0;
+  if (attempt >= 30) return;
+  setTimeout(function() {
+    fetch(appPath('/api/servers/' + encodeURIComponent(serverId) + '/retirement'))
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        var phase = data.retirement && data.retirement.phase;
+        if (phase === 'removed') {
+          if (getStoredServerId() === serverId) clearStoredServerId();
+          if (currentServerId === serverId) { currentServerId = null; currentServer = null; }
+          reloadServerViews();
+          return;
+        }
+        if (phase) pollServerRetirement(serverId, attempt + 1);
+      })
+      .catch(function() { pollServerRetirement(serverId, attempt + 1); });
+  }, 2000);
+}
+
 function deleteServer(serverId) {
   if (!serverId || !serversCache.some(function(server) { return server.id === serverId; })) return;
   if (!confirm(t('servers.actions.delete_confirm', 'Delete this server entry?'))) return;
@@ -1046,6 +1069,14 @@ function deleteServer(serverId) {
     .then(function(data) {
       if (data.error) {
         showToast(formatApiError(data, 'servers.toast.delete_error', 'Error deleting server'), 'error');
+        return;
+      }
+      // Recoverable retirement: the entry stays visible (with a "Retiring"
+      // badge) until jobs drain and the connector is released.
+      if (data.retirement && data.retirement.phase && data.retirement.phase !== 'removed') {
+        reloadServerViews();
+        showToast(t('servers.toast.delete_retiring', 'Server is being retired and will disappear once its operations have finished'), 'info');
+        pollServerRetirement(serverId);
         return;
       }
       if (getStoredServerId() === serverId) {

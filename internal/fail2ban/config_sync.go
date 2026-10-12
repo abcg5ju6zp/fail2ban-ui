@@ -93,6 +93,10 @@ func (m *Manager) syncState(id string) *configSyncState {
 }
 
 func (m *Manager) RequestConfigSync(id string, action, defaults bool) {
+	// A retiring server is frozen: no further pushes, its sync state is gone.
+	if m.IsRetiring(id) {
+		return
+	}
 	state := m.syncState(id)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -130,6 +134,10 @@ func (m *Manager) configRetryDue(id string) bool {
 }
 
 func (m *Manager) SyncServerConfig(ctx context.Context, id string) error {
+	// Frozen servers never accept new config pushes and must not be scheduled.
+	if m.IsRetiring(id) {
+		return ErrServerRetiring
+	}
 	if !m.ownsOperation(ctx, id) {
 		m.mu.RLock()
 		schedule := m.configSyncScheduler

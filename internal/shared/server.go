@@ -47,7 +47,16 @@ type Fail2banServer struct {
 	DisabledReason       string    `json:"disabledReason,omitempty"`
 	HostKeyError         string    `json:"hostKeyError,omitempty"`
 	HostKeyFingerprint   string    `json:"hostKeyFingerprint,omitempty"`
+	// Retirement metadata. RetirementPhase is empty for live servers; once set
+	// the server is frozen and driven through the recoverable retirement flow.
+	RetirementPhase      string    `json:"retirementPhase,omitempty"`
+	RetirementGeneration int64     `json:"retirementGeneration,omitempty"`
+	RetirementError      string    `json:"retirementError,omitempty"`
+	RetirementUpdatedAt  time.Time `json:"retirementUpdatedAt,omitzero"`
 }
+
+// IsRetiring reports whether the server entry is frozen for deletion.
+func (s Fail2banServer) IsRetiring() bool { return s.RetirementPhase != "" }
 
 // Distinguishes explicit false for "enabled" from a missing key.
 func (s *Fail2banServer) UnmarshalJSON(data []byte) error {

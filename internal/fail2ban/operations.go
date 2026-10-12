@@ -48,6 +48,10 @@ func (m *Manager) ownsOperation(ctx context.Context, serverID string) bool {
 	if !ok || lease.manager != m || m.operationTargetKey(lease.serverID) != m.operationTargetKey(serverID) {
 		return false
 	}
+	return m.leaseOwnsGate(lease)
+}
+
+func (m *Manager) leaseOwnsGate(lease *operationLease) bool {
 	lease.gate.mu.Lock()
 	defer lease.gate.mu.Unlock()
 	return lease.gate.owner == lease
@@ -190,6 +194,20 @@ func OperationCheckpoint(ctx context.Context, phase string) error {
 func (m *Manager) BeginOperation(ctx context.Context, serverID, operationID, kind string) (context.Context, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
+	}
+	// A persisted retirement fences every newly admitted operation, including
+	// jobs that only reach this gate after being queued. An operation that
+	// already owns the lease (reentrant context) is allowed to finish below.
+	if held, ok := ctx.Value(operationLeaseKey{}).(*operationLease); !ok ||
+		held.manager != m ||
+		m.operationTargetKey(held.serverID) != m.operationTargetKey(serverID) ||
+		!m.leaseOwnsGate(held) {
+		m.mu.RLock()
+		retired := m.targetIsRetiringLocked(m.operationTargetKey(serverID))
+		m.mu.RUnlock()
+		if retired {
+			return nil, nil, ErrServerRetiring
+		}
 	}
 	if held, ok := ctx.Value(operationLeaseKey{}).(*operationLease); ok && held.manager == m && m.operationTargetKey(held.serverID) == m.operationTargetKey(serverID) {
 		held.gate.mu.Lock()

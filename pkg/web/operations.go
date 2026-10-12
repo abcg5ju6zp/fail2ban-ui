@@ -140,7 +140,9 @@ func PrepareOperations(ctx context.Context) error {
 		svc.leases[op.ID] = operationLease{ctx: context.WithoutCancel(held), release: release}
 	}
 	operationService = svc
+	retirementSvc = newRetirementCoordinator(svc.engine)
 	svc.manager.SetConfigSyncScheduler(svc.scheduleConfigSync)
+	svc.engine.SetRetirementGate(svc.manager.IsRetiring)
 	svc.engine.SetListener(func(op operations.Operation) {
 		if op.Terminal() || op.Phase == "applying" {
 			InvalidateServerSnapshot(op.ServerID)
@@ -168,6 +170,8 @@ func StartOperations() error {
 		return err
 	}
 	go svc.reconcileLoop()
+	// Resume any server retirement interrupted by a previous shutdown.
+	startRetirementLoop(svc.ctx)
 	return nil
 }
 func CloseOperations(ctx context.Context) error {
@@ -208,6 +212,10 @@ func submitOperation(c *gin.Context, kind string) {
 		c.JSON(http.StatusBadRequest, buildErrorResponse(err, ""))
 		return
 	}
+	if fail2ban.GetManager().IsRetiring(conn.Server().ID) {
+		c.JSON(http.StatusConflict, gin.H{"error": "This server is being retired and rejects new operations."})
+		return
+	}
 	enqueueOperation(c, operationService, conn, kind)
 }
 
@@ -240,7 +248,10 @@ func enqueueOperation(c *gin.Context, svc *operationController, conn fail2ban.Co
 	op, err := svc.engine.Submit(c.Request.Context(), conn.Server().ID, kind, target, c.GetHeader("Idempotency-Key"), payload)
 	if err != nil {
 		status := 500
-		if errors.Is(err, operations.ErrIdempotencyConflict) {
+		switch {
+		case errors.Is(err, operations.ErrIdempotencyConflict):
+			status = 409
+		case errors.Is(err, operations.ErrServerRetiring):
 			status = 409
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -495,6 +506,10 @@ func (s *operationController) reconcile(op operations.Operation) {
 
 // Automatic repairs and settings sync share the same durable queue and lease.
 func (s *operationController) scheduleConfigSync(serverID string) {
+	// Frozen servers accept no new sync jobs.
+	if s.manager.IsRetiring(serverID) {
+		return
+	}
 	s.scheduleMu.Lock()
 	defer s.scheduleMu.Unlock()
 	ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)

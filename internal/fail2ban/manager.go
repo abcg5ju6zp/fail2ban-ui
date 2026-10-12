@@ -91,6 +91,8 @@ type Manager struct {
 	reloadMu            sync.Mutex
 	mu                  sync.RWMutex
 	connectors          map[string]Connector
+	retiring            map[string]*retiringRuntime
+	retiringTargets     map[string]int64
 	defaultServerID     string
 	monitorStop         chan struct{}
 	monitorKick         chan struct{}
@@ -139,6 +141,11 @@ func (m *Manager) ReloadFromServers(servers []shared.Fail2banServer) error {
 
 	var added []string
 	for _, srv := range servers {
+		// Retiring servers never receive a replacement connector; the
+		// retirement flow owns the detained connector's teardown.
+		if srv.RetirementPhase != "" {
+			continue
+		}
 		if previous := old[srv.ID]; previous != nil {
 			changed := !srv.Enabled || !sameConnectorConfig(previous.Server(), srv)
 			if ssh, ok := previous.(*SSHConnector); ok {
@@ -168,6 +175,9 @@ func (m *Manager) ReloadFromServers(servers []shared.Fail2banServer) error {
 	m.mu.Lock()
 	m.connectors = connectors
 	m.defaultServerID = defaultID
+	// Retiring entries keep their detained connectors; retirements whose rows
+	// vanished while the process was down finish their runtime cleanup here.
+	detained := m.reconcileRetiringLocked(servers, old)
 	for id := range m.configSync {
 		if _, live := connectors[id]; !live {
 			delete(m.configSync, id)
@@ -190,8 +200,17 @@ func (m *Manager) ReloadFromServers(servers []shared.Fail2banServer) error {
 	for _, id := range added {
 		m.RequestConfigSync(id, true, true)
 	}
-	// Tear down the connectors of the servers that were removed, disabled or replaced
+	// Tear down the connectors of the servers that were removed, disabled or replaced.
+	// Connectors detained for retirement are released by the retirement flow itself.
 	for id, conn := range old {
+		if entry := detained[id]; entry != nil {
+			entry.mu.Lock()
+			detainedConn := entry.conn
+			entry.mu.Unlock()
+			if detainedConn == conn {
+				continue
+			}
+		}
 		if next := connectors[id]; next != conn {
 			releaseConnector(conn, next)
 		}
@@ -226,6 +245,11 @@ func releaseConnector(old, next Connector) {
 func sameConnectorConfig(a, b shared.Fail2banServer) bool {
 	a.UpdatedAt, b.UpdatedAt = time.Time{}, time.Time{}
 	a.IsDefault, b.IsDefault = false, false
+	// Retirement metadata never defines connector identity.
+	a.RetirementPhase, b.RetirementPhase = "", ""
+	a.RetirementGeneration, b.RetirementGeneration = 0, 0
+	a.RetirementError, b.RetirementError = "", ""
+	a.RetirementUpdatedAt, b.RetirementUpdatedAt = time.Time{}, time.Time{}
 	return reflect.DeepEqual(a, b)
 }
 
@@ -241,11 +265,24 @@ func (m *Manager) Close() {
 	m.monitorWG.Wait()
 	m.mu.Lock()
 	connectors := m.connectors
+	retiring := m.retiring
 	m.connectors = make(map[string]Connector)
+	m.retiring = nil
+	m.retiringTargets = nil
 	m.mu.Unlock()
 	for id, conn := range connectors {
 		if err := conn.Close(); err != nil {
 			debugf("failed to close connector %s: %v", id, err)
+		}
+	}
+	for id, entry := range retiring {
+		entry.mu.Lock()
+		conn := entry.conn
+		entry.mu.Unlock()
+		if conn != nil {
+			if err := conn.Close(); err != nil {
+				debugf("failed to close retiring connector %s: %v", id, err)
+			}
 		}
 	}
 }
@@ -304,7 +341,7 @@ func (m *Manager) serverMonitorLoop(stop <-chan struct{}) {
 func pickDefaultServerID(servers []shared.Fail2banServer) string {
 	var fallback string
 	for _, srv := range servers {
-		if !srv.Enabled {
+		if !srv.Enabled || srv.RetirementPhase != "" {
 			continue
 		}
 		if fallback == "" {
@@ -320,13 +357,22 @@ func pickDefaultServerID(servers []shared.Fail2banServer) string {
 // Returns the connector for the specified server ID.
 func (m *Manager) Connector(serverID string) (Connector, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	conn, ok := m.connectors[serverID]
+	if !ok {
+		// The detained connector stays reachable while in-flight operations
+		// reconcile during the drain phase; new admissions are fenced elsewhere.
+		if entry := m.retiring[serverID]; entry != nil {
+			entry.mu.Lock()
+			conn = entry.conn
+			entry.mu.Unlock()
+		}
+	}
+	m.mu.RUnlock()
 
 	if serverID == "" {
 		return nil, fmt.Errorf("server id must be provided")
 	}
-	conn, ok := m.connectors[serverID]
-	if !ok {
+	if conn == nil {
 		return nil, fmt.Errorf("connector for server %s not found or not enabled", serverID)
 	}
 	return conn, nil

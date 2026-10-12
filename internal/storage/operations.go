@@ -190,6 +190,29 @@ func (s *OperationStore) HasActiveKind(ctx context.Context, serverID, kind strin
 	return exists, err
 }
 
+// CancelQueuedForServer cancels every still-queued operation of a retiring
+// server. Already claimed operations keep running and are drained separately.
+// Returns the number of operations that were cancelled.
+func (s *OperationStore) CancelQueuedForServer(ctx context.Context, serverID string) (int64, error) {
+	now := formatStorageTime(time.Now())
+	res, err := s.db.ExecContext(ctx, `UPDATE operations
+		SET state = 'cancelled', phase = 'cancelled', message = 'Cancelled because the server is being retired', updated_at = ?, finished_at = ?
+		WHERE server_id = ? AND state = 'queued'`, now, now, serverID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return n, err
+}
+
+// InFlightCountForServer counts operations that still own (or must reconcile)
+// a server's daemon. Retirement cannot release the connector until this is zero.
+func (s *OperationStore) InFlightCountForServer(ctx context.Context, serverID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM operations WHERE server_id = ? AND state IN ('running','reconciling')`, serverID).Scan(&count)
+	return count, err
+}
+
 func (s *OperationStore) RecoverRunning(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE operations SET state = 'reconciling', phase = 'reconciling', message = 'The UI restarted before completion was confirmed. Checking the server before any further changes.', updated_at = ? WHERE state = 'running'`, formatStorageTime(time.Now()))
 	return err

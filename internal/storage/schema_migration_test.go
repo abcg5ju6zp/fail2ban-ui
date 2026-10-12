@@ -172,6 +172,7 @@ func TestSchemaMatchesExpectedColumns(t *testing.T) {
 			"id", "name", "type", "host", "port", "socket_path", "config_path", "ssh_user", "ssh_key_path",
 			"agent_url", "agent_secret", "hostname", "tags", "is_default", "enabled", "reverse_tunnel",
 			"tunnel_port", "created_at", "updated_at",
+			"retirement_phase", "retirement_generation", "retirement_error", "retirement_updated_at",
 		},
 		"ban_events": {
 			"id", "server_id", "server_name", "jail", "ip", "country", "hostname", "failures", "whois",

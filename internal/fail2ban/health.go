@@ -174,6 +174,11 @@ func (m *Manager) recordHealthResult(conn Connector, h ServerHealth, now, probeS
 		m.mu.Unlock()
 		return
 	}
+	// A probe that finished after the server was marked retiring is stale.
+	if m.retiring[id] != nil {
+		m.mu.Unlock()
+		return
+	}
 	if m.health == nil {
 		m.health = make(map[string]ServerHealth)
 	}

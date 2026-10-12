@@ -547,6 +547,10 @@ func applyServerRecordsLocked(records []storage.ServerRecord) {
 			CreatedAt:            rec.CreatedAt,
 			UpdatedAt:            rec.UpdatedAt,
 			EnabledSet:           true,
+			RetirementPhase:      rec.RetirementPhase,
+			RetirementGeneration: rec.RetirementGeneration,
+			RetirementError:      rec.RetirementError,
+			RetirementUpdatedAt:  rec.RetirementUpdatedAt,
 		}
 		servers = append(servers, server)
 	}
@@ -670,6 +674,10 @@ func toServerRecordsLocked() ([]storage.ServerRecord, error) {
 			TunnelPort:           srv.TunnelPort,
 			CreatedAt:            createdAt,
 			UpdatedAt:            updatedAt,
+			RetirementPhase:      srv.RetirementPhase,
+			RetirementGeneration: srv.RetirementGeneration,
+			RetirementError:      srv.RetirementError,
+			RetirementUpdatedAt:  srv.RetirementUpdatedAt,
 		})
 	}
 	return records, nil
@@ -898,6 +906,11 @@ func normalizeServersLocked() {
 		} else {
 			server.SocketPath = normalizePathValue(server.SocketPath)
 		}
+		// Retiring entries are frozen: normalization must neither re-enable,
+		// re-default nor "fix" them while the retirement flow is in progress.
+		if server.RetirementPhase != "" {
+			continue
+		}
 		if !server.EnabledSet {
 			if server.Type == "local" {
 				server.Enabled = false
@@ -933,8 +946,12 @@ func normalizeServersLocked() {
 	}
 	if !hasDefault {
 		for idx := range currentSettings.Servers {
-			if currentSettings.Servers[idx].Enabled {
-				currentSettings.Servers[idx].IsDefault = true
+			srv := &currentSettings.Servers[idx]
+			if srv.RetirementPhase != "" {
+				continue
+			}
+			if srv.Enabled {
+				srv.IsDefault = true
 				hasDefault = true
 				break
 			}
@@ -1184,12 +1201,12 @@ func GetDefaultServer() Fail2banServer {
 	defer settingsLock.RUnlock()
 
 	for _, srv := range currentSettings.Servers {
-		if srv.IsDefault && srv.Enabled {
+		if srv.IsDefault && srv.Enabled && srv.RetirementPhase == "" {
 			return cloneServer(srv)
 		}
 	}
 	for _, srv := range currentSettings.Servers {
-		if srv.Enabled {
+		if srv.Enabled && srv.RetirementPhase == "" {
 			return cloneServer(srv)
 		}
 	}
@@ -1267,6 +1284,9 @@ func UpsertServer(input Fail2banServer) (Fail2banServer, error) {
 	replaced := false
 	for idx, srv := range currentSettings.Servers {
 		if srv.ID == input.ID {
+			if srv.RetirementPhase != "" {
+				return Fail2banServer{}, ErrServerRetiring
+			}
 			if !input.EnabledSet {
 				input.Enabled = srv.Enabled
 				input.EnabledSet = true
@@ -1340,6 +1360,9 @@ func SetDefaultServer(id string) (Fail2banServer, error) {
 	for idx := range currentSettings.Servers {
 		srv := &currentSettings.Servers[idx]
 		if srv.ID == id {
+			if srv.RetirementPhase != "" {
+				return Fail2banServer{}, ErrServerRetiring
+			}
 			found = true
 			srv.IsDefault = true
 			if !srv.Enabled {
